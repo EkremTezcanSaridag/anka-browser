@@ -1,0 +1,14 @@
+[workspace] 
+#projenın moduler olacağını belirtir
+
+resolver = "2" #modern paket çözümleyici
+members = [
+    "crates/anka-url", #ilk modül URL ayrıştırıcı
+]
+
+#tüm alt modüllerin bilgilerini içeren kısım 
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+repository = "https://github.com/EkremTezcanSaridag/anka-browser"

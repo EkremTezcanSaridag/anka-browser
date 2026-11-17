@@ -1,0 +1,10 @@
+# Rust derleme çıktıları (Asla GitHub'a yüklenmez)
+/target/
+
+# Windows ve macOS işletim sistemi gizli çöp dosyaları
+Thumbs.db
+.DS_Store
+
+# Editör geçici yedek dosyaları
+*.swp
+*~
