@@ -4,6 +4,7 @@
 resolver = "2" #modern paket çözümleyici
 members = [
     "crates/anka-url", #ilk modül URL ayrıştırıcı
+    "crates/anka-net", #Nete Bağlanabilecek modül
 ]
 
 #tüm alt modüllerin bilgilerini içeren kısım 

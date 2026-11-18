@@ -68,11 +68,12 @@ Anka'nın çekirdek motoru bir web sayfasını aşağıdaki boru hattı (pipelin
 
 - [ ] **Faz 0 — Temel İskelet ve Monorepo Kurulumu**
   - [x] Proje vizyonunun ve mimarisinin belirlenmesi (`README.md`)
-  - [ ] Çalışma alanı (Workspace) ve CI/CD (GitHub Actions) kurulumu
-  - [ ] Açık kaynak katkı rehberi (`CONTRIBUTING.md`) ve lisansın eklenmesi
-- [ ] **Faz 1 — `anka-url` ve `anka-net` (Ağ Katmanı)**
-  - [ ] WHATWG uyumlu URL ayrıştırıcı ve birim testleri
-  - [ ] HTTP/1.1 + TLS istemcisi (`GET`/`POST`, Headers, Chunked Transfer, Gzip)
+  - [x] Rust Cargo çalışma alanı (Workspace) kurulumu
+  - [ ] CI/CD (GitHub Actions), `CONTRIBUTING.md` ve açık kaynak lisansının eklenmesi
+- [x] **Faz 1 — `anka-url` ve `anka-net` (Temel Ağ Katmanı)**
+  - [x] WHATWG uyumlu URL ayrıştırıcı, varsayılan port çözümleyici ve birim testleri (`crates/anka-url`)
+  - [x] HTTP/1.1 TCP istemcisi (`GET`, Headers, yanıt ayrıştırıcı) ve birim testleri (`crates/anka-net`)
+  - [ ] İleri ağ özellikleri (TLS/HTTPS, Yönlendirme takibi, Chunked Transfer, Gzip)
 - [ ] **Faz 2 — `anka-html` ve `anka-css` (Ayrıştırma Katmanı)**
   - [ ] HTML5 Tokenizer ve DOM ağacı oluşturucu
   - [ ] CSS kural ayrıştırıcı ve DOM düğümlerine stil bağlama
@@ -85,6 +86,24 @@ Anka'nın çekirdek motoru bir web sayfasını aşağıdaki boru hattı (pipelin
 - [ ] **Faz 5 — JavaScript, Süreç İzolasyonu ve Güvenlik**
   - [ ] JavaScript motoru ve DOM API entegrasyonu
   - [ ] Çok süreçli (Multi-process) sekme izolasyonu ve yerleşik izleyici/reklam engelleyici
+
+---
+
+## 🛠️ Derleme ve Test (Quick Start)
+
+Projeyi yerel ortamınızda derlemek ve tüm modüllerin birim testlerini çalıştırmak için **Rust (`cargo`)** kurulu olması yeterlidir:
+
+```bash
+# Depoyu klonlayın
+git clone https://github.com/EkremTezcanSaridag/anka-browser.git
+cd anka-browser
+
+# Tüm çalışma alanını kontrol edin
+cargo check
+
+# Tüm modüllerin birim testlerini çalıştırın (anka-url, anka-net, ...)
+cargo test
+```
 
 ---
 

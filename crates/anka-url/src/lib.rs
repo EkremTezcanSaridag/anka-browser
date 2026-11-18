@@ -115,9 +115,20 @@ impl Url {
             fragment,
         })
     }
-    
-}
 
+    /// Adreste port belirtilmişse onu döner; belirtilmemişse
+    /// protokole göre varsayılan kapı numarasını (http -> 80, https -> 443) döner.
+    pub fn effective_port(&self) -> Option<u16> {
+        match self.port {
+            Some(p) => Some(p),
+            None => match self.scheme.as_str() {
+                "http" => Some(80),
+                "https" => Some(443),
+                _ => None,
+            },
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -142,5 +153,23 @@ mod tests {
         assert_eq!(Url::parse("anka.dev"), Err(UrlError::MissingScheme));
         assert_eq!(Url::parse("http://"), Err(UrlError::MissingHost));
         assert_eq!(Url::parse("http://anka.dev:elma"), Err(UrlError::InvalidPort));
+    }
+
+    #[test]
+    fn test_varsayilan_portlar() {
+        // http için varsayılan port 80 olmalı
+        let http_url = Url::parse("http://anka.dev").unwrap();
+        assert_eq!(http_url.port, None);
+        assert_eq!(http_url.effective_port(), Some(80));
+
+        // https için varsayılan port 443 olmalı
+        let https_url = Url::parse("https://anka.dev").unwrap();
+        assert_eq!(https_url.port, None);
+        assert_eq!(https_url.effective_port(), Some(443));
+
+        // Elle port yazılmışsa (8080) onu ezmemeli, 8080 vermeli
+        let custom_url = Url::parse("http://anka.dev:8080").unwrap();
+        assert_eq!(custom_url.port, Some(8080));
+        assert_eq!(custom_url.effective_port(), Some(8080));
     }
 }
