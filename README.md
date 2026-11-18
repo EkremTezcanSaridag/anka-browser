@@ -75,8 +75,8 @@ Anka'nın çekirdek motoru bir web sayfasını aşağıdaki boru hattı (pipelin
   - [x] HTTP/1.1 TCP istemcisi (`GET`, Headers, yanıt ayrıştırıcı) ve birim testleri (`crates/anka-net`)
   - [ ] İleri ağ özellikleri (TLS/HTTPS, Yönlendirme takibi, Chunked Transfer, Gzip)
 - [ ] **Faz 2 — `anka-html` ve `anka-css` (Ayrıştırma Katmanı)**
-  - [ ] HTML5 Tokenizer ve DOM ağacı oluşturucu
-  - [ ] CSS kural ayrıştırıcı ve DOM düğümlerine stil bağlama
+  - [x] HTML5 Tokenizer ve hata toleranslı DOM ağacı oluşturucu (`crates/anka-html`)
+  - [ ] CSS kural ayrıştırıcı ve DOM düğümlerine stil bağlama (`crates/anka-css`)
 - [ ] **Faz 3 — `anka-layout` ve `anka-paint` ("Merhaba Web")**
   - [ ] Block & Inline kutu modeli yerleşimi
   - [ ] İlk yerel ve uzak HTML sayfasının pencereye çizilmesi
