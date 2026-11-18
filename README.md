@@ -78,8 +78,8 @@ Anka'nın çekirdek motoru bir web sayfasını aşağıdaki boru hattı (pipelin
   - [x] HTML5 Tokenizer ve hata toleranslı DOM ağacı oluşturucu (`crates/anka-html`)
   - [x] CSS kural ayrıştırıcı ve stil bildirimleri (`crates/anka-css`)
 - [ ] **Faz 3 — `anka-layout` ve `anka-paint` ("Merhaba Web")**
-  - [ ] Block & Inline kutu modeli yerleşimi
-  - [ ] İlk yerel ve uzak HTML sayfasının pencereye çizilmesi
+  - [x] Block & Inline kutu modeli yerleşimi ve CSS stil eşleştirme (`crates/anka-layout`)
+  - [ ] İlk yerel ve uzak HTML sayfasının ekrana çizilmesi (`crates/anka-browser`)
 - [ ] **Faz 4 — Tarayıcı Arayüzü ve Etkileşim**
   - [ ] Adres çubuğu, tıklanabilir bağlantılar (`<a href>`), kaydırma (scroll) ve çoklu sekme
   - [ ] Görsel (`<img>`) desteği ve Flexbox yerleşimi

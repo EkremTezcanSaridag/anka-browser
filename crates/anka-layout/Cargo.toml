@@ -1,0 +1,12 @@
+# anka-layout modülünün kimlik kartı
+[package]
+name = "anka-layout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Hem HTML ağacını (DomNode) hem de CSS kurallarını (CssRule) kullanacağız:
+anka-html = { path = "../anka-html" }
+anka-css = { path = "../anka-css" }

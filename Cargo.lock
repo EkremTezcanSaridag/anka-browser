@@ -11,6 +11,14 @@ name = "anka-html"
 version = "0.1.0"
 
 [[package]]
+name = "anka-layout"
+version = "0.1.0"
+dependencies = [
+ "anka-css",
+ "anka-html",
+]
+
+[[package]]
 name = "anka-net"
 version = "0.1.0"
 dependencies = [
