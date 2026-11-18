@@ -1,0 +1,7 @@
+# anka-css modülünün kimlik kartı
+[package]
+name = "anka-css"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true

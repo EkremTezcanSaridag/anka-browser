@@ -6,6 +6,7 @@ members = [
     "crates/anka-url", #ilk modül URL ayrıştırıcı
     "crates/anka-net", #Nete Bağlanabilecek modül
     "crates/anka-html", #HTML kodlarını anlayacak DOM yapısı kuracak modül
+    "crates/anka-css",  # CSS stil ve renk kurallarını ayrıştıran modül
 ]
 
 #tüm alt modüllerin bilgilerini içeren kısım 
