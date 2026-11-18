@@ -1,0 +1,16 @@
+# anka-browser ana uygulamasının kimlik kartı
+[package]
+name = "anka-browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Yazdığımız 6 motor istasyonunun tamamını ana tarayıcıya bağlıyoruz!
+anka-url = { path = "../anka-url" }
+anka-net = { path = "../anka-net" }
+anka-html = { path = "../anka-html" }
+anka-css = { path = "../anka-css" }
+anka-layout = { path = "../anka-layout" }
+anka-paint = { path = "../anka-paint" }

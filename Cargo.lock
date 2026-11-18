@@ -3,6 +3,18 @@
 version = 4
 
 [[package]]
+name = "anka-browser"
+version = "0.1.0"
+dependencies = [
+ "anka-css",
+ "anka-html",
+ "anka-layout",
+ "anka-net",
+ "anka-paint",
+ "anka-url",
+]
+
+[[package]]
 name = "anka-css"
 version = "0.1.0"
 
@@ -23,6 +35,13 @@ name = "anka-net"
 version = "0.1.0"
 dependencies = [
  "anka-url",
+]
+
+[[package]]
+name = "anka-paint"
+version = "0.1.0"
+dependencies = [
+ "anka-layout",
 ]
 
 [[package]]

@@ -77,9 +77,9 @@ Anka'nın çekirdek motoru bir web sayfasını aşağıdaki boru hattı (pipelin
 - [x] **Faz 2 — `anka-html` ve `anka-css` (Ayrıştırma Katmanı)**
   - [x] HTML5 Tokenizer ve hata toleranslı DOM ağacı oluşturucu (`crates/anka-html`)
   - [x] CSS kural ayrıştırıcı ve stil bildirimleri (`crates/anka-css`)
-- [ ] **Faz 3 — `anka-layout` ve `anka-paint` ("Merhaba Web")**
+- [x] **Faz 3 — `anka-layout` ve `anka-paint` ("Merhaba Web")**
   - [x] Block & Inline kutu modeli yerleşimi ve CSS stil eşleştirme (`crates/anka-layout`)
-  - [ ] İlk yerel ve uzak HTML sayfasının ekrana çizilmesi (`crates/anka-browser`)
+  - [x] RGB çizim komutları listesi (`crates/anka-paint`) ve 6 modülü birleştiren ana uygulama (`crates/anka-browser`)
 - [ ] **Faz 4 — Tarayıcı Arayüzü ve Etkileşim**
   - [ ] Adres çubuğu, tıklanabilir bağlantılar (`<a href>`), kaydırma (scroll) ve çoklu sekme
   - [ ] Görsel (`<img>`) desteği ve Flexbox yerleşimi
@@ -101,8 +101,14 @@ cd anka-browser
 # Tüm çalışma alanını kontrol edin
 cargo check
 
-# Tüm modüllerin birim testlerini çalıştırın (anka-url, anka-net, ...)
+# Tüm modüllerin birim testlerini çalıştırın (anka-url, anka-net, anka-html, anka-css, anka-layout, anka-paint)
 cargo test
+
+# Dahili karşılama sayfasıyla motoru çalıştırın
+cargo run
+
+# Gerçek bir web sitesine (örn: CERN - Dünyanın ilk web sitesi) bağlanıp 6 istasyondan geçirerek çizin
+cargo run -- http://info.cern.ch
 ```
 
 ---

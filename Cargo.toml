@@ -8,6 +8,8 @@ members = [
     "crates/anka-html", #HTML kodlarını anlayacak DOM yapısı kuracak modül
     "crates/anka-css",  # CSS stil ve renk kurallarını ayrıştıran modül
     "crates/anka-layout", # Kutuların ekrandaki (x, y) koordinatlarını hesaplayan modül
+    "crates/anka-paint",  # Koordinatlı kutuları RGB çizim komutlarına (Display List) çeviren modül
+    "crates/anka-browser", # Tüm motor modüllerini birleştiren ana tarayıcı uygulaması
 ]
 
 #tüm alt modüllerin bilgilerini içeren kısım 

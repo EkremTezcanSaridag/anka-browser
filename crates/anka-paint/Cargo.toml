@@ -1,0 +1,10 @@
+# anka-paint modülünün kimlik kartı
+[package]
+name = "anka-paint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anka-layout = { path = "../anka-layout" }
