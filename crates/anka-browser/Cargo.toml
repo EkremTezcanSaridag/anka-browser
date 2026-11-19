@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 # Yazdığımız 6 motor istasyonunun tamamını ana tarayıcıya bağlıyoruz!
+# Hiçbir ağır dış GUI kütüphanesi yok — saf, sıfır bağımlılıklı yerel pencere!
 anka-url = { path = "../anka-url" }
 anka-net = { path = "../anka-net" }
 anka-html = { path = "../anka-html" }
