@@ -1,5 +1,8 @@
 # 🦅 Anka Browser
 
+[![CI](https://github.com/EkremTezcanSaridag/anka-browser/actions/workflows/ci.yml/badge.svg)](https://github.com/EkremTezcanSaridag/anka-browser/actions/workflows/ci.yml)
+[![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
+
 **Anka**, sıfırdan kendi web motoruyla (*Telek Engine*) geliştirilen, bağımsız ve açık kaynak kodlu bir web tarayıcısı projesidir.
 
 Modern web dünyası bugün yalnızca birkaç dev motorun (Blink/Chromium, WebKit ve Gecko) tekeline sıkışmış durumdadır. **Anka**, bir web sayfasının ağ üzerinden indirilmesinden ekranda piksellere dönüştürülmesine kadar geçen tüm süreci bağımsız, modüler ve anlaşılır bir mimariyle sıfırdan inşa etmeyi hedefler.
@@ -66,10 +69,10 @@ Anka'nın çekirdek motoru bir web sayfasını aşağıdaki boru hattı (pipelin
 
 ## 🗺️ Yol Haritası (Roadmap)
 
-- [ ] **Faz 0 — Temel İskelet ve Monorepo Kurulumu**
+- [x] **Faz 0 — Temel İskelet ve Monorepo Kurulumu**
   - [x] Proje vizyonunun ve mimarisinin belirlenmesi (`README.md`)
   - [x] Rust Cargo çalışma alanı (Workspace) kurulumu
-  - [ ] CI/CD (GitHub Actions), `CONTRIBUTING.md` ve açık kaynak lisansının eklenmesi
+  - [x] CI/CD (GitHub Actions), `CONTRIBUTING.md` ve açık kaynak lisansının (`MPL-2.0`) eklenmesi
 - [x] **Faz 1 — `anka-url` ve `anka-net` (Temel Ağ Katmanı)**
   - [x] WHATWG uyumlu URL ayrıştırıcı, varsayılan port çözümleyici ve birim testleri (`crates/anka-url`)
   - [x] HTTP/1.1 TCP istemcisi (`GET`, Headers, yanıt ayrıştırıcı) ve birim testleri (`crates/anka-net`)

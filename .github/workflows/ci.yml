@@ -1,0 +1,34 @@
+# Anka Browser - Otomatik Derleme, Test ve Kalite Denetimi (GitHub Actions CI)
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-and-test:
+    name: Build, Test & Clippy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Depoyu indir (Checkout)
+        uses: actions/checkout@v4
+
+      - name: Rust derleyicisini kur (Toolchain)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Derleme kontrolü (cargo check)
+        run: cargo check --workspace --all-targets
+
+      - name: Birim testlerini çalıştır (cargo test)
+        run: cargo test --workspace
+
+      - name: Kod kalitesi denetimi (cargo clippy - sıfır uyarı kuralı)
+        run: cargo clippy --workspace --all-targets -- -D warnings
