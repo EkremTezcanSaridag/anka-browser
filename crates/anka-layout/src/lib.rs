@@ -29,6 +29,9 @@ pub struct LayoutBox {
 
     // Yazının boyutu (piksel, örn: 32, 16)
     pub font_size: u32,
+
+    // Eğer bu kutu bir link (<a>) ise hedef adresi
+    pub href: Option<String>,
 }
 
 /// HTML ağacını (`DomNode`) ve CSS kurallarını (`CssRule`) birleştirerek
@@ -38,7 +41,15 @@ pub fn compute_layout(root: &DomNode, rules: &[CssRule], viewport_width: u32) ->
     // İlk kutuyu ekranın üstünden 16 piksel aşağıdan başlatıyoruz:
     let mut current_y: u32 = 16;
 
-    layout_node(root, "body", rules, viewport_width, &mut current_y, &mut boxes);
+    layout_node(
+        root,
+        "body",
+        None,
+        rules,
+        viewport_width,
+        &mut current_y,
+        &mut boxes,
+    );
 
     boxes
 }
@@ -47,6 +58,7 @@ pub fn compute_layout(root: &DomNode, rules: &[CssRule], viewport_width: u32) ->
 fn layout_node(
     node: &DomNode,
     current_tag: &str,
+    current_href: Option<&str>,
     rules: &[CssRule],
     viewport_width: u32,
     current_y: &mut u32,
@@ -61,8 +73,18 @@ fn layout_node(
                 return;
             }
 
+            let next_href = node.get_attribute("href").or(current_href);
+
             for child in &node.children {
-                layout_node(child, tag_name, rules, viewport_width, current_y, boxes);
+                layout_node(
+                    child,
+                    tag_name,
+                    next_href,
+                    rules,
+                    viewport_width,
+                    current_y,
+                    boxes,
+                );
             }
         }
 
@@ -111,6 +133,7 @@ fn layout_node(
                 height,
                 color,
                 font_size,
+                href: current_href.map(|s| s.to_string()),
             });
 
             // E) Bir sonraki kutu bunun üstüne binmesin diye `current_y` metresini aşağı kaydır!

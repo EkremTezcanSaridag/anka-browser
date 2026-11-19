@@ -17,6 +17,9 @@ pub struct DomNode {
     // Bu kutu bir etiket mi yoksa düz yazı mı?
     pub node_type: NodeType,
 
+    // Etiket özellikleri (örneğin: [("href", "https://example.com")])
+    pub attributes: Vec<(String, String)>,
+
     // Bu kutunun içinde bulunan alt kutuların (çocukların) listesi
     pub children: Vec<DomNode>,
 }
@@ -26,6 +29,16 @@ impl DomNode {
     pub fn element(tag_name: &str) -> Self {
         DomNode {
             node_type: NodeType::Element(tag_name.to_lowercase()),
+            attributes: Vec::new(),
+            children: Vec::new(),
+        }
+    }
+
+    /// Özellikleriyle birlikte yeni bir Etiket (Element) kutusu oluşturur
+    pub fn element_with_attrs(tag_name: &str, attributes: Vec<(String, String)>) -> Self {
+        DomNode {
+            node_type: NodeType::Element(tag_name.to_lowercase()),
+            attributes,
             children: Vec::new(),
         }
     }
@@ -34,9 +47,59 @@ impl DomNode {
     pub fn text(content: &str) -> Self {
         DomNode {
             node_type: NodeType::Text(content.to_string()),
+            attributes: Vec::new(),
             children: Vec::new(),
         }
     }
+
+    /// Etiketin belirli bir özelliğinin (örn: "href") değerini döner
+    pub fn get_attribute(&self, name: &str) -> Option<&str> {
+        self.attributes
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+}
+
+/// Etiketin içindeki özellikleri (örn: `a href="Status.html"`) ayrıştırır
+fn parse_tag_and_attrs(tag_content: &str) -> (String, Vec<(String, String)>) {
+    let mut parts = tag_content.splitn(2, char::is_whitespace);
+    let tag_name = parts.next().unwrap_or("").to_lowercase();
+    let mut attrs = Vec::new();
+
+    if let Some(mut rest) = parts.next() {
+        while !rest.is_empty() {
+            rest = rest.trim_start();
+            if rest.is_empty() {
+                break;
+            }
+            if let Some(eq_idx) = rest.find('=') {
+                let key = rest[..eq_idx].trim().to_lowercase();
+                let after_eq = rest[eq_idx + 1..].trim_start();
+                if let Some(quote) = after_eq.chars().next().filter(|&c| c == '"' || c == '\'') {
+                    let after_quote = &after_eq[1..];
+                    if let Some(end_quote) = after_quote.find(quote) {
+                        let val = after_quote[..end_quote].to_string();
+                        if !key.is_empty() {
+                            attrs.push((key, val));
+                        }
+                        rest = &after_quote[end_quote + 1..];
+                        continue;
+                    }
+                }
+                let end_val = after_eq.find(char::is_whitespace).unwrap_or(after_eq.len());
+                let val = after_eq[..end_val].to_string();
+                if !key.is_empty() {
+                    attrs.push((key, val));
+                }
+                rest = &after_eq[end_val..];
+            } else {
+                break;
+            }
+        }
+    }
+
+    (tag_name, attrs)
 }
 
 /// Düz HTML metnini okur ve iç içe kutulardan oluşan DOM Ağacına (`DomNode`) dönüştürür.
@@ -89,12 +152,8 @@ pub fn parse_html(raw: &str) -> DomNode {
                 let kendi_kapanan_mi = tag_icerigi.ends_with('/');
                 let temiz_etiket = tag_icerigi.trim_end_matches('/');
 
-                // Etiketin içinde boşluk/özellik varsa sadece ilk kelimeyi (etiket adını) al
-                let etiket_adi = temiz_etiket
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_lowercase();
+                // Etiketin adını ve varsa özelliklerini (örn: href="...") ayrıştır
+                let (etiket_adi, ozellikler) = parse_tag_and_attrs(temiz_etiket);
 
                 if etiket_adi.is_empty() {
                     continue;
@@ -108,12 +167,14 @@ pub fn parse_html(raw: &str) -> DomNode {
 
                 if kendi_kapanan_mi || tekil_etiket {
                     if let Some(acik_kutu) = stack.last_mut() {
-                        acik_kutu.children.push(DomNode::element(&etiket_adi));
+                        acik_kutu
+                            .children
+                            .push(DomNode::element_with_attrs(&etiket_adi, ozellikler));
                     }
                 } else {
-                    // Normal açılış etiketi (örn: <h1>):
+                    // Normal açılış etiketi (örn: <h1> veya <a href="...">):
                     // Yeni kutuyu aç ve masanın en üstüne koy (içine gelecek yazıları beklesin)
-                    stack.push(DomNode::element(&etiket_adi));
+                    stack.push(DomNode::element_with_attrs(&etiket_adi, ozellikler));
                 }
             }
         } else {
@@ -190,5 +251,15 @@ mod tests {
         assert_eq!(kok.node_type, NodeType::Element("div".to_string()));
         assert_eq!(kok.children.len(), 1);
         assert_eq!(kok.children[0].node_type, NodeType::Element("p".to_string()));
+    }
+
+    #[test]
+    fn test_link_href_ozelligi_okuma() {
+        let html = "<p><a href=\"Status.html\">Durum Sayfasi</a></p>";
+        let kok = parse_html(html);
+
+        let link = &kok.children[0];
+        assert_eq!(link.node_type, NodeType::Element("a".to_string()));
+        assert_eq!(link.get_attribute("href"), Some("Status.html"));
     }
 }
