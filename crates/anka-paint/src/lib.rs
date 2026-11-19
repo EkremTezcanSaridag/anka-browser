@@ -37,6 +37,7 @@ pub struct PaintCommand {
     pub height: u32,
     pub font_size: u32,
     pub color: RgbColor,
+    pub href: Option<String>,
 }
 
 /// `anka-layout` modülünden gelen koordinatlı kutuları (`LayoutBox`),
@@ -54,6 +55,7 @@ pub fn build_display_list(boxes: &[LayoutBox]) -> Vec<PaintCommand> {
             height: b.height,
             font_size: b.font_size,
             color: RgbColor::from_css_name(&b.color),
+            href: b.href.clone(),
         });
     }
 
@@ -75,6 +77,7 @@ mod tests {
             height: 48,
             color: "red".to_string(),
             font_size: 40,
+            href: None,
         }];
 
         let cizim_listesi = build_display_list(&kutular);

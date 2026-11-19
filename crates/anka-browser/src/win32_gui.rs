@@ -40,6 +40,8 @@ const WM_SIZE: u32 = 0x0005;
 const WM_PAINT: u32 = 0x000F;
 const WM_COMMAND: u32 = 0x0111;
 const WM_SETFONT: u32 = 0x0030;
+const WM_LBUTTONDOWN: u32 = 0x0201;
+const WM_MOUSEWHEEL: u32 = 0x020A;
 
 const IDC_ARROW: *const u16 = 32512 as *const u16;
 const TRANSPARENT: i32 = 1;
@@ -57,6 +59,7 @@ const ID_BTN_GO: usize = 102;
 const ID_BTN_HOME: usize = 103;
 const ID_BTN_CERN: usize = 104;
 const ID_BTN_EXAMPLE: usize = 105;
+const ID_BTN_BACK: usize = 106;
 
 const TOOLBAR_HEIGHT: i32 = 48;
 const STATUS_HEIGHT: i32 = 28;
@@ -179,6 +182,9 @@ unsafe extern "system" {
 struct PencereDurumu {
     url_edit: usize,
     btn_go: usize,
+    current_url: String,
+    history: Vec<String>,
+    scroll_y: i32,
     durum_mesaji: String,
     cizim_listesi: Vec<PaintCommand>,
 }
@@ -193,12 +199,17 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16)
 }
 
-fn sayfayi_yukle_ve_yenile(hwnd: HWND, adres: &str) {
+fn sayfayi_yukle_ve_yenile(hwnd: HWND, adres: &str, gecmise_ekle: bool) {
     let (durum_mesaji, cizim_listesi) = motoru_calistir(adres);
 
     if let Ok(mut guard) = DURUM.lock()
         && let Some(st) = guard.as_mut()
     {
+        if gecmise_ekle && !st.current_url.is_empty() && st.current_url != adres {
+            st.history.push(st.current_url.clone());
+        }
+        st.current_url = adres.to_string();
+        st.scroll_y = 0;
         st.durum_mesaji = durum_mesaji;
         st.cizim_listesi = cizim_listesi;
         let url_edit = st.url_edit as HWND;
@@ -240,15 +251,31 @@ unsafe extern "system" fn wnd_proc(
                     to_wide("Segoe UI").as_ptr(),
                 );
 
-                // Hızlı Erişim Butonları: Ana Sayfa, CERN, Example.com
+                // Hızlı Erişim Butonları: Geri, Ana Sayfa, CERN, Example.com
+                let btn_back = CreateWindowExW(
+                    0,
+                    to_wide("BUTTON").as_ptr(),
+                    to_wide("<- Geri").as_ptr(),
+                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    10,
+                    10,
+                    65,
+                    28,
+                    hwnd,
+                    ID_BTN_BACK as HMENU,
+                    hinst,
+                    null_mut(),
+                );
+                SendMessageW(btn_back, WM_SETFONT, ui_font as WPARAM, 1);
+
                 let btn_home = CreateWindowExW(
                     0,
                     to_wide("BUTTON").as_ptr(),
                     to_wide("Ana Sayfa").as_ptr(),
                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    82,
                     10,
-                    10,
-                    85,
+                    82,
                     28,
                     hwnd,
                     ID_BTN_HOME as HMENU,
@@ -262,9 +289,9 @@ unsafe extern "system" fn wnd_proc(
                     to_wide("BUTTON").as_ptr(),
                     to_wide("CERN (1991)").as_ptr(),
                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    102,
+                    170,
                     10,
-                    95,
+                    92,
                     28,
                     hwnd,
                     ID_BTN_CERN as HMENU,
@@ -278,9 +305,9 @@ unsafe extern "system" fn wnd_proc(
                     to_wide("BUTTON").as_ptr(),
                     to_wide("Example.com").as_ptr(),
                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    204,
+                    268,
                     10,
-                    98,
+                    95,
                     28,
                     hwnd,
                     ID_BTN_EXAMPLE as HMENU,
@@ -295,9 +322,9 @@ unsafe extern "system" fn wnd_proc(
                     to_wide("EDIT").as_ptr(),
                     to_wide("http://anka.local/hosgeldiniz").as_ptr(),
                     WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                    312,
+                    372,
                     10,
-                    500,
+                    440,
                     28,
                     hwnd,
                     ID_URL_EDIT as HMENU,
@@ -347,9 +374,9 @@ unsafe extern "system" fn wnd_proc(
                 if let Ok(guard) = DURUM.lock()
                     && let Some(st) = guard.as_ref()
                 {
-                    let edit_w = (width - 312 - 90).max(120);
-                    MoveWindow(st.url_edit as HWND, 312, 10, edit_w, 28, 1);
-                    MoveWindow(st.btn_go as HWND, 312 + edit_w + 8, 10, 72, 28, 1);
+                    let edit_w = (width - 372 - 90).max(120);
+                    MoveWindow(st.url_edit as HWND, 372, 10, edit_w, 28, 1);
+                    MoveWindow(st.btn_go as HWND, 372 + edit_w + 8, 10, 72, 28, 1);
                 }
                 InvalidateRect(hwnd, null(), 1);
             }
@@ -376,13 +403,71 @@ unsafe extern "system" fn wnd_proc(
                         }
                     };
                     if !adres.trim().is_empty() {
-                        sayfayi_yukle_ve_yenile(hwnd, &adres);
+                        sayfayi_yukle_ve_yenile(hwnd, &adres, true);
                     }
                 }
-                ID_BTN_HOME => sayfayi_yukle_ve_yenile(hwnd, "http://anka.local/hosgeldiniz"),
-                ID_BTN_CERN => sayfayi_yukle_ve_yenile(hwnd, "http://info.cern.ch"),
-                ID_BTN_EXAMPLE => sayfayi_yukle_ve_yenile(hwnd, "http://example.com"),
+                ID_BTN_BACK => {
+                    let onceki = DURUM.lock().ok().and_then(|mut g| {
+                        g.as_mut().and_then(|s| s.history.pop())
+                    });
+                    if let Some(prev_url) = onceki {
+                        sayfayi_yukle_ve_yenile(hwnd, &prev_url, false);
+                    }
+                }
+                ID_BTN_HOME => sayfayi_yukle_ve_yenile(hwnd, "http://anka.local/hosgeldiniz", true),
+                ID_BTN_CERN => sayfayi_yukle_ve_yenile(hwnd, "http://info.cern.ch", true),
+                ID_BTN_EXAMPLE => sayfayi_yukle_ve_yenile(hwnd, "http://example.com", true),
                 _ => {}
+            }
+            0
+        }
+
+        WM_LBUTTONDOWN => {
+            let click_y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+            let hedef_link = {
+                let guard = DURUM.lock().ok();
+                guard.and_then(|g| {
+                    g.as_ref().and_then(|st| {
+                        let base_url = anka_url::Url::parse(&st.current_url).ok()?;
+                        for komut in &st.cizim_listesi {
+                            if let Some(href) = &komut.href {
+                                let draw_y = TOOLBAR_HEIGHT + komut.y as i32 - st.scroll_y;
+                                let draw_bottom = draw_y + komut.height as i32;
+                                if click_y >= draw_y
+                                    && click_y <= draw_bottom
+                                    && let Ok(resolved) = base_url.resolve(href)
+                                {
+                                    let port_part = resolved
+                                        .port
+                                        .map(|p| format!(":{p}"))
+                                        .unwrap_or_default();
+                                    return Some(format!(
+                                        "{}://{}{}{}",
+                                        resolved.scheme, resolved.host, port_part, resolved.path
+                                    ));
+                                }
+                            }
+                        }
+                        None
+                    })
+                })
+            };
+
+            if let Some(yeni_adres) = hedef_link {
+                sayfayi_yukle_ve_yenile(hwnd, &yeni_adres, true);
+            }
+            0
+        }
+
+        WM_MOUSEWHEEL => {
+            let delta = ((wparam >> 16) & 0xFFFF) as i16 as i32;
+            if let Ok(mut guard) = DURUM.lock()
+                && let Some(st) = guard.as_mut()
+            {
+                st.scroll_y = (st.scroll_y - (delta / 3)).max(0);
+            }
+            unsafe {
+                InvalidateRect(hwnd, null(), 1);
             }
             0
         }
@@ -471,9 +556,9 @@ unsafe extern "system" fn wnd_proc(
 
                         let wide_text = to_wide(&komut.text);
                         let draw_x = komut.x as i32 + 8;
-                        let draw_y = TOOLBAR_HEIGHT + komut.y as i32;
+                        let draw_y = TOOLBAR_HEIGHT + komut.y as i32 - st.scroll_y;
 
-                        if draw_y < client.bottom - STATUS_HEIGHT - 12 {
+                        if draw_y >= TOOLBAR_HEIGHT && draw_y < client.bottom - STATUS_HEIGHT - 12 {
                             TextOutW(
                                 hdc,
                                 draw_x,
@@ -541,6 +626,9 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) {
         *guard = Some(PencereDurumu {
             url_edit: 0,
             btn_go: 0,
+            current_url: baslangic_adresi.to_string(),
+            history: Vec::new(),
+            scroll_y: 0,
             durum_mesaji,
             cizim_listesi,
         });

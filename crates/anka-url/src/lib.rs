@@ -128,6 +128,45 @@ impl Url {
             },
         }
     }
+
+    /// Mevcut sayfanın adresini (`self`) temel alarak, sayfa içindeki
+    /// bağıl veya tam bir linki (`href`) tam URL'ye dönüştürür.
+    pub fn resolve(&self, href: &str) -> Result<Self, UrlError> {
+        let href = href.trim();
+        if href.is_empty() {
+            return Err(UrlError::EmptyUrl);
+        }
+
+        // 1. Eğer link zaten "http://" veya "https://" gibi tam bir adres ise doğrudan ayrıştır
+        if href.contains("://") {
+            return Url::parse(href);
+        }
+
+        // 2. "//ornek.com/yol" şeklinde protokolsüz link ise mevcut protokolü ekle
+        if href.starts_with("//") {
+            return Url::parse(&format!("{}:{}", self.scheme, href));
+        }
+
+        let port_str = match self.port {
+            Some(p) => format!(":{p}"),
+            None => String::new(),
+        };
+
+        // 3. "/sayfa.html" şeklinde kök dizinden başlıyorsa host'un sonuna ekle
+        if href.starts_with('/') {
+            return Url::parse(&format!("{}://{}{}{}", self.scheme, self.host, port_str, href));
+        }
+
+        // 4. "Status.html" gibi bağıl bir dosya ise mevcut klasör yolunun sonuna ekle
+        let base_dir = match self.path.rfind('/') {
+            Some(idx) => &self.path[..=idx],
+            None => "/",
+        };
+        Url::parse(&format!(
+            "{}://{}{}{}{}",
+            self.scheme, self.host, port_str, base_dir, href
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -171,5 +210,24 @@ mod tests {
         let custom_url = Url::parse("http://anka.dev:8080").unwrap();
         assert_eq!(custom_url.port, Some(8080));
         assert_eq!(custom_url.effective_port(), Some(8080));
+    }
+
+    #[test]
+    fn test_bagil_url_cozumleme() {
+        let base = Url::parse("http://info.cern.ch/hypertext/WWW/TheProject.html").unwrap();
+
+        // Kök dizinden başlayan link
+        let kok = base.resolve("/index.html").unwrap();
+        assert_eq!(kok.host, "info.cern.ch");
+        assert_eq!(kok.path, "/index.html");
+
+        // Aynı klasördeki bağıl link
+        let bagil = base.resolve("Status.html").unwrap();
+        assert_eq!(bagil.path, "/hypertext/WWW/Status.html");
+
+        // Tam URL linki
+        let tam = base.resolve("https://example.com/test").unwrap();
+        assert_eq!(tam.scheme, "https");
+        assert_eq!(tam.host, "example.com");
     }
 }
