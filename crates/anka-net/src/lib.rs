@@ -29,7 +29,12 @@ pub enum NetError {
     // Sunucuya bağlandık ama sunucu bize HTTP standardına uymayan
     // anlamsız/bozuk baytlar gönderdiyse bu hatayı veririz.
     InvalidResponse,
+
+    // 5. Sonsuz yönlendirme döngüsü koruması (5'ten fazla 301/302 gelirse dur!)
+    TooManyRedirects,
 }
+
+
 
 /// OTOMATİK TERCÜMAN (Type Conversion):
 /// Windows işletim sistemi hata verdiğinde bize "std::io::Error" döner.
@@ -52,9 +57,60 @@ pub struct HttpResponse {
     pub body: String,
 }
 
-/// Verilen `Url` adresine TCP üzerinden bağlanır, HTTP/1.1 GET isteği atar
-/// ve sunucudan dönen yanıtı `HttpResponse` paketi olarak döndürür.
+impl HttpResponse {
+    /// Zarfın (`self.headers`) içinde aradığımız başlığı (örn: "location") bulur.
+    /// - `&self`: Bu `HttpResponse` paketinin kendi verilerine sadece okuma amaçlı bakar.
+    /// - `name: &str`: Aradığımız başlığın adı (örn: `"location"`).
+    /// - `-> Option<&str>`: Başlığı bulursa `Some("http://...")`, bulamazsa `None` (boş) döner.
+    pub fn get_header(&self, name: &str) -> Option<&str> {
+        // Zarfın içindeki her (Anahtar, Değer) çiftini sırayla tek tek gez:
+        // Örn: 1. tur -> key = "Content-Type", value = "text/html"
+        //      2. tur -> key = "Location",     value = "http://www.google.com/"
+        for (key, value) in &self.headers {
+            // `eq_ignore_ascii_case`: Büyük/küçük harf farkını yoksayarak karşılaştırır!
+            // Yani "Location" == "location" veya "LOCATION" == "location" -> DOĞRU (true) verir.
+            if key.eq_ignore_ascii_case(name) {
+                // Aradığımız başlığı bulduk! Değerini (`Some(value)`) hemen döndür ve döngüden çık.
+                return Some(value);
+            }
+        }
+        // Tüm başlıkları gezdik ama aradığımız başlık zarfta yokmuş -> Boş (`None`) dön.
+        None
+    }
+}
+
+/// Verilen `Url` adresine bağlanır ve sunucu `301 / 302 / 303 / 307 / 308`
+/// yönlendirme yanıtı dönerse `Location:` başlığını otomatik takip eder (en fazla 5 kez).
 pub fn fetch(url: &Url) -> Result<HttpResponse, NetError> {
+    const MAX_REDIRECTS: usize = 5;
+    let mut current_url = url.clone();
+
+    for _ in 0..=MAX_REDIRECTS {
+        // Tek bir HTTP isteği at
+        let response = fetch_once(&current_url)?;
+
+        // Sunucu "Bu sayfa taşındı (301/302/307/308)" dediyse ve zarfta "Location" varsa:
+        let is_redirect = matches!(response.status_code, 301 | 302 | 303 | 307 | 308);
+        if is_redirect && let Some(location) = response.get_header("location") {
+            // Yeni adresi (kısa/bağıl bile olsa) `anka-url::Url::resolve` ile tam adrese çevir
+            current_url = current_url
+                .resolve(location)
+                .map_err(|_| NetError::InvalidResponse)?;
+            // Döngünün başına dönüp yeni adrese bağlan!
+            continue;
+        }
+
+        // Yönlendirme yoksa (örn: 200 OK veya 404), cevabı doğrudan teslim et!
+        return Ok(response);
+    }
+
+    // 5 yönlendirmeyi aştıysak sonsuz döngüye girmemek için dur!
+    Err(NetError::TooManyRedirects)
+}
+
+/// Verilen `Url` adresine TCP üzerinden tek bir HTTP/1.1 GET isteği atar
+/// ve sunucudan dönen yanıtı `HttpResponse` paketi olarak döndürür.
+fn fetch_once(url: &Url) -> Result<HttpResponse, NetError> {
     // 1. ADIM: Protokol kontrolü (Şimdilik düz "http" bağlantısını destekliyoruz)
     if url.scheme != "http" {
         return Err(NetError::UnsupportedScheme(url.scheme.clone()));
@@ -168,5 +224,17 @@ mod tests {
         let sonuc = fetch(&ftp_url);
 
         assert!(matches!(sonuc, Err(NetError::UnsupportedScheme(_))));
+    }
+
+    #[test]
+    fn test_location_basligi_okuma() {
+        let yonlendirme_yaniti = "HTTP/1.1 301 Moved Permanently\r\nLOCATION: http://www.google.com/\r\n\r\nMoved";
+        let yanit = parse_http_response(yonlendirme_yaniti).unwrap();
+
+        assert_eq!(yanit.status_code, 301);
+        assert_eq!(
+            yanit.get_header("location"),
+            Some("http://www.google.com/")
+        );
     }
 }
