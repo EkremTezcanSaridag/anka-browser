@@ -254,6 +254,33 @@ pub fn extract_styles(node: &DomNode) -> String {
     css
 }
 
+/// DOM ağacındaki `<link rel="stylesheet" href="...">` etiketlerinin `href` adreslerini toplar.
+pub fn extract_stylesheet_links(node: &DomNode) -> Vec<String> {
+    let mut links = Vec::new();
+    collect_stylesheet_links(node, &mut links);
+    links
+}
+
+fn collect_stylesheet_links(node: &DomNode, out: &mut Vec<String>) {
+    if let NodeType::Element(tag) = &node.node_type
+        && tag == "link"
+    {
+        let is_stylesheet = node
+            .get_attribute("rel")
+            .is_some_and(|r| r.eq_ignore_ascii_case("stylesheet"));
+        if is_stylesheet && let Some(href) = node.get_attribute("href") {
+            let trimmed = href.trim();
+            if !trimmed.is_empty() {
+                out.push(trimmed.to_string());
+            }
+        }
+    }
+
+    for child in &node.children {
+        collect_stylesheet_links(child, out);
+    }
+}
+
 fn collect_styles(node: &DomNode, out: &mut String) {
     if let NodeType::Element(tag) = &node.node_type
         && tag == "style"
@@ -343,5 +370,14 @@ mod tests {
         assert_eq!(extract_title(&kok), Some("Anka & Telek".to_string()));
         let p_text = &kok.children[1].children[0].children[0].node_type;
         assert_eq!(*p_text, NodeType::Text("A < B   \"OK\"".to_string()));
+    }
+
+    #[test]
+    fn test_harici_stylesheet_link_cikarma() {
+        let html = "<html><head><link rel=\"stylesheet\" href=\"/css/main.css\"></head><body></body></html>";
+        let kok = parse_html(html);
+
+        let links = extract_stylesheet_links(&kok);
+        assert_eq!(links, vec!["/css/main.css".to_string()]);
     }
 }

@@ -40,10 +40,14 @@ const WM_SIZE: u32 = 0x0005;
 const WM_PAINT: u32 = 0x000F;
 const WM_COMMAND: u32 = 0x0111;
 const WM_SETFONT: u32 = 0x0030;
+const WM_KEYDOWN: u32 = 0x0100;
+const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_MOUSEWHEEL: u32 = 0x020A;
 
+const VK_RETURN: usize = 0x0D;
 const IDC_ARROW: *const u16 = 32512 as *const u16;
+const IDC_HAND: *const u16 = 32649 as *const u16;
 const TRANSPARENT: i32 = 1;
 const FW_NORMAL: i32 = 400;
 const FW_BOLD: i32 = 700;
@@ -144,6 +148,7 @@ unsafe extern "system" {
     fn DefWindowProcW(hWnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) -> LRESULT;
     fn PostQuitMessage(nExitCode: i32);
     fn LoadCursorW(hInstance: HINSTANCE, lpCursorName: *const u16) -> HCURSOR;
+    fn SetCursor(hCursor: HCURSOR) -> HCURSOR;
     fn BeginPaint(hWnd: HWND, lpPaint: *mut PAINTSTRUCT) -> HDC;
     fn EndPaint(hWnd: HWND, lpPaint: *const PAINTSTRUCT) -> i32;
     fn FillRect(hdc: HDC, lprc: *const RECT, hbr: HBRUSH) -> i32;
@@ -203,8 +208,19 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
 }
 
 fn sayfayi_yukle_ve_yenile(hwnd: HWND, adres: &str, gecmise_ekle: bool) {
+    let mut rc = RECT {
+        left: 0,
+        top: 0,
+        right: 880,
+        bottom: 640,
+    };
+    unsafe {
+        GetClientRect(hwnd, &mut rc);
+    }
+    let viewport_w = (rc.right - rc.left).max(400) as u32;
+
     let temiz_adres = normalize_address(adres);
-    let (sayfa_basligi, durum_mesaji, cizim_listesi) = motoru_calistir(&temiz_adres);
+    let (sayfa_basligi, durum_mesaji, cizim_listesi) = motoru_calistir(&temiz_adres, viewport_w);
 
     if let Ok(mut guard) = DURUM.lock()
         && let Some(st) = guard.as_mut()
@@ -226,8 +242,8 @@ fn sayfayi_yukle_ve_yenile(hwnd: HWND, adres: &str, gecmise_ekle: bool) {
 
     // Pencere başlığını sayfanın gerçek `<title>` etiketiyle güncelle!
     let pencere_basligi = match sayfa_basligi {
-        Some(t) => format!("{t} — Anka Browser v0.2"),
-        None => "Anka Browser v0.2 — Telek Engine".to_string(),
+        Some(t) => format!("{t} — Anka Browser v0.2.1"),
+        None => "Anka Browser v0.2.1 — Telek Engine".to_string(),
     };
     let wide_title = to_wide(&pencere_basligi);
     unsafe {
@@ -491,6 +507,32 @@ unsafe extern "system" fn wnd_proc(
             0
         }
 
+        WM_MOUSEMOVE => {
+            let mouse_y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+            let link_var_mi = {
+                let guard = DURUM.lock().ok();
+                guard.is_some_and(|g| {
+                    g.as_ref().is_some_and(|st| {
+                        st.cizim_listesi.iter().any(|komut| {
+                            if komut.href.is_some() {
+                                let draw_y = TOOLBAR_HEIGHT + komut.y as i32 - st.scroll_y;
+                                let draw_bottom = draw_y + komut.height as i32;
+                                mouse_y >= draw_y && mouse_y <= draw_bottom
+                            } else {
+                                false
+                            }
+                        })
+                    })
+                })
+            };
+
+            unsafe {
+                let cursor = if link_var_mi { IDC_HAND } else { IDC_ARROW };
+                SetCursor(LoadCursorW(null_mut(), cursor));
+            }
+            0
+        }
+
         WM_LBUTTONDOWN => {
             let click_y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
             let hedef_link = {
@@ -628,6 +670,19 @@ unsafe extern "system" fn wnd_proc(
                         let draw_y = TOOLBAR_HEIGHT + komut.y as i32 - st.scroll_y;
 
                         if draw_y >= TOOLBAR_HEIGHT && draw_y < client.bottom - STATUS_HEIGHT - 12 {
+                            // Eğer kutunun CSS arka plan rengi (`background-color`) varsa önce kutuyu boya!
+                            if let Some(bg) = &komut.bg_color {
+                                let bg_rect = RECT {
+                                    left: draw_x - 4,
+                                    top: draw_y - 2,
+                                    right: (draw_x + komut.width as i32).min(client.right - 16),
+                                    bottom: draw_y + komut.height as i32,
+                                };
+                                let bg_brush = CreateSolidBrush(rgb(bg.r, bg.g, bg.b));
+                                FillRect(hdc, &bg_rect, bg_brush);
+                                DeleteObject(bg_brush as HGDIOBJ);
+                            }
+
                             TextOutW(
                                 hdc,
                                 draw_x,
@@ -690,7 +745,7 @@ unsafe extern "system" fn wnd_proc(
 
 pub fn pencereyi_baslat(baslangic_adresi: &str) {
     let temiz_adres = normalize_address(baslangic_adresi);
-    let (sayfa_basligi, durum_mesaji, cizim_listesi) = motoru_calistir(&temiz_adres);
+    let (sayfa_basligi, durum_mesaji, cizim_listesi) = motoru_calistir(&temiz_adres, 880);
 
     if let Ok(mut guard) = DURUM.lock() {
         *guard = Some(PencereDurumu {
@@ -709,8 +764,8 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) {
         let hinst = GetModuleHandleW(null());
         let class_name = to_wide("AnkaBrowserWindowClass");
         let title_str = match sayfa_basligi {
-            Some(t) => format!("{t} — Anka Browser v0.2"),
-            None => "Anka Browser v0.2 — Telek Engine".to_string(),
+            Some(t) => format!("{t} — Anka Browser v0.2.1"),
+            None => "Anka Browser v0.2.1 — Telek Engine".to_string(),
         };
         let title = to_wide(&title_str);
 
@@ -758,6 +813,11 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) {
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
+            // Adres çubuğunda Enter tuşuna (`VK_RETURN`) basıldıysa "Git ->" butonunu tetikle!
+            if msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN {
+                SendMessageW(hwnd, WM_COMMAND, ID_BTN_GO, 0);
+                continue;
+            }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
