@@ -10,7 +10,7 @@ use std::sync::Mutex;
 
 use anka_paint::PaintCommand;
 
-use crate::motoru_calistir;
+use crate::{motoru_calistir, normalize_address};
 
 type HWND = *mut c_void;
 type HINSTANCE = *mut c_void;
@@ -60,6 +60,8 @@ const ID_BTN_HOME: usize = 103;
 const ID_BTN_CERN: usize = 104;
 const ID_BTN_EXAMPLE: usize = 105;
 const ID_BTN_BACK: usize = 106;
+const ID_BTN_FORWARD: usize = 107;
+const ID_BTN_RELOAD: usize = 108;
 
 const TOOLBAR_HEIGHT: i32 = 48;
 const STATUS_HEIGHT: i32 = 28;
@@ -184,6 +186,7 @@ struct PencereDurumu {
     btn_go: usize,
     current_url: String,
     history: Vec<String>,
+    forward_history: Vec<String>,
     scroll_y: i32,
     durum_mesaji: String,
     cizim_listesi: Vec<PaintCommand>,
@@ -200,26 +203,35 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
 }
 
 fn sayfayi_yukle_ve_yenile(hwnd: HWND, adres: &str, gecmise_ekle: bool) {
-    let (durum_mesaji, cizim_listesi) = motoru_calistir(adres);
+    let temiz_adres = normalize_address(adres);
+    let (sayfa_basligi, durum_mesaji, cizim_listesi) = motoru_calistir(&temiz_adres);
 
     if let Ok(mut guard) = DURUM.lock()
         && let Some(st) = guard.as_mut()
     {
-        if gecmise_ekle && !st.current_url.is_empty() && st.current_url != adres {
+        if gecmise_ekle && !st.current_url.is_empty() && st.current_url != temiz_adres {
             st.history.push(st.current_url.clone());
+            st.forward_history.clear();
         }
-        st.current_url = adres.to_string();
+        st.current_url = temiz_adres.clone();
         st.scroll_y = 0;
         st.durum_mesaji = durum_mesaji;
         st.cizim_listesi = cizim_listesi;
         let url_edit = st.url_edit as HWND;
-        let wide_url = to_wide(adres);
+        let wide_url = to_wide(&temiz_adres);
         unsafe {
             SetWindowTextW(url_edit, wide_url.as_ptr());
         }
     }
 
+    // Pencere başlığını sayfanın gerçek `<title>` etiketiyle güncelle!
+    let pencere_basligi = match sayfa_basligi {
+        Some(t) => format!("{t} — Anka Browser v0.2"),
+        None => "Anka Browser v0.2 — Telek Engine".to_string(),
+    };
+    let wide_title = to_wide(&pencere_basligi);
     unsafe {
+        SetWindowTextW(hwnd, wide_title.as_ptr());
         InvalidateRect(hwnd, null(), 1);
     }
 }
@@ -251,15 +263,15 @@ unsafe extern "system" fn wnd_proc(
                     to_wide("Segoe UI").as_ptr(),
                 );
 
-                // Hızlı Erişim Butonları: Geri, Ana Sayfa, CERN, Example.com
+                // Gezinme Butonları: <- Geri, -> İleri, Yenile, Ana Sayfa, CERN, HTTPS Example
                 let btn_back = CreateWindowExW(
                     0,
                     to_wide("BUTTON").as_ptr(),
-                    to_wide("<- Geri").as_ptr(),
+                    to_wide("<-").as_ptr(),
                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    8,
                     10,
-                    10,
-                    65,
+                    32,
                     28,
                     hwnd,
                     ID_BTN_BACK as HMENU,
@@ -268,14 +280,46 @@ unsafe extern "system" fn wnd_proc(
                 );
                 SendMessageW(btn_back, WM_SETFONT, ui_font as WPARAM, 1);
 
+                let btn_forward = CreateWindowExW(
+                    0,
+                    to_wide("BUTTON").as_ptr(),
+                    to_wide("->").as_ptr(),
+                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    44,
+                    10,
+                    32,
+                    28,
+                    hwnd,
+                    ID_BTN_FORWARD as HMENU,
+                    hinst,
+                    null_mut(),
+                );
+                SendMessageW(btn_forward, WM_SETFONT, ui_font as WPARAM, 1);
+
+                let btn_reload = CreateWindowExW(
+                    0,
+                    to_wide("BUTTON").as_ptr(),
+                    to_wide("Yenile").as_ptr(),
+                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    80,
+                    10,
+                    54,
+                    28,
+                    hwnd,
+                    ID_BTN_RELOAD as HMENU,
+                    hinst,
+                    null_mut(),
+                );
+                SendMessageW(btn_reload, WM_SETFONT, ui_font as WPARAM, 1);
+
                 let btn_home = CreateWindowExW(
                     0,
                     to_wide("BUTTON").as_ptr(),
                     to_wide("Ana Sayfa").as_ptr(),
                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    82,
+                    138,
                     10,
-                    82,
+                    76,
                     28,
                     hwnd,
                     ID_BTN_HOME as HMENU,
@@ -287,11 +331,11 @@ unsafe extern "system" fn wnd_proc(
                 let btn_cern = CreateWindowExW(
                     0,
                     to_wide("BUTTON").as_ptr(),
-                    to_wide("CERN (1991)").as_ptr(),
+                    to_wide("CERN").as_ptr(),
                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    170,
+                    218,
                     10,
-                    92,
+                    54,
                     28,
                     hwnd,
                     ID_BTN_CERN as HMENU,
@@ -303,11 +347,11 @@ unsafe extern "system" fn wnd_proc(
                 let btn_example = CreateWindowExW(
                     0,
                     to_wide("BUTTON").as_ptr(),
-                    to_wide("Example.com").as_ptr(),
+                    to_wide("HTTPS Example").as_ptr(),
                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    268,
+                    276,
                     10,
-                    95,
+                    106,
                     28,
                     hwnd,
                     ID_BTN_EXAMPLE as HMENU,
@@ -322,9 +366,9 @@ unsafe extern "system" fn wnd_proc(
                     to_wide("EDIT").as_ptr(),
                     to_wide("http://anka.local/hosgeldiniz").as_ptr(),
                     WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                    372,
+                    388,
                     10,
-                    440,
+                    430,
                     28,
                     hwnd,
                     ID_URL_EDIT as HMENU,
@@ -374,9 +418,9 @@ unsafe extern "system" fn wnd_proc(
                 if let Ok(guard) = DURUM.lock()
                     && let Some(st) = guard.as_ref()
                 {
-                    let edit_w = (width - 372 - 90).max(120);
-                    MoveWindow(st.url_edit as HWND, 372, 10, edit_w, 28, 1);
-                    MoveWindow(st.btn_go as HWND, 372 + edit_w + 8, 10, 72, 28, 1);
+                    let edit_w = (width - 388 - 88).max(120);
+                    MoveWindow(st.url_edit as HWND, 388, 10, edit_w, 28, 1);
+                    MoveWindow(st.btn_go as HWND, 388 + edit_w + 8, 10, 72, 28, 1);
                 }
                 InvalidateRect(hwnd, null(), 1);
             }
@@ -408,15 +452,40 @@ unsafe extern "system" fn wnd_proc(
                 }
                 ID_BTN_BACK => {
                     let onceki = DURUM.lock().ok().and_then(|mut g| {
-                        g.as_mut().and_then(|s| s.history.pop())
+                        g.as_mut().and_then(|s| {
+                            let prev = s.history.pop()?;
+                            s.forward_history.push(s.current_url.clone());
+                            Some(prev)
+                        })
                     });
                     if let Some(prev_url) = onceki {
                         sayfayi_yukle_ve_yenile(hwnd, &prev_url, false);
                     }
                 }
+                ID_BTN_FORWARD => {
+                    let sonraki = DURUM.lock().ok().and_then(|mut g| {
+                        g.as_mut().and_then(|s| {
+                            let next = s.forward_history.pop()?;
+                            s.history.push(s.current_url.clone());
+                            Some(next)
+                        })
+                    });
+                    if let Some(next_url) = sonraki {
+                        sayfayi_yukle_ve_yenile(hwnd, &next_url, false);
+                    }
+                }
+                ID_BTN_RELOAD => {
+                    let mevcut = DURUM
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|s| s.current_url.clone()));
+                    if let Some(url) = mevcut {
+                        sayfayi_yukle_ve_yenile(hwnd, &url, false);
+                    }
+                }
                 ID_BTN_HOME => sayfayi_yukle_ve_yenile(hwnd, "http://anka.local/hosgeldiniz", true),
                 ID_BTN_CERN => sayfayi_yukle_ve_yenile(hwnd, "http://info.cern.ch", true),
-                ID_BTN_EXAMPLE => sayfayi_yukle_ve_yenile(hwnd, "http://example.com", true),
+                ID_BTN_EXAMPLE => sayfayi_yukle_ve_yenile(hwnd, "https://example.com", true),
                 _ => {}
             }
             0
@@ -620,14 +689,16 @@ unsafe extern "system" fn wnd_proc(
 }
 
 pub fn pencereyi_baslat(baslangic_adresi: &str) {
-    let (durum_mesaji, cizim_listesi) = motoru_calistir(baslangic_adresi);
+    let temiz_adres = normalize_address(baslangic_adresi);
+    let (sayfa_basligi, durum_mesaji, cizim_listesi) = motoru_calistir(&temiz_adres);
 
     if let Ok(mut guard) = DURUM.lock() {
         *guard = Some(PencereDurumu {
             url_edit: 0,
             btn_go: 0,
-            current_url: baslangic_adresi.to_string(),
+            current_url: temiz_adres.clone(),
             history: Vec::new(),
+            forward_history: Vec::new(),
             scroll_y: 0,
             durum_mesaji,
             cizim_listesi,
@@ -637,7 +708,11 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) {
     unsafe {
         let hinst = GetModuleHandleW(null());
         let class_name = to_wide("AnkaBrowserWindowClass");
-        let title = to_wide("Anka Browser v0.1 — Telek Engine");
+        let title_str = match sayfa_basligi {
+            Some(t) => format!("{t} — Anka Browser v0.2"),
+            None => "Anka Browser v0.2 — Telek Engine".to_string(),
+        };
+        let title = to_wide(&title_str);
 
         let wc = WNDCLASSW {
             style: 0x0003,

@@ -44,9 +44,10 @@ impl DomNode {
     }
 
     /// Yeni bir Düz Yazı (Text) kutusu oluşturmak için kısayol fonksiyonu
+    /// İçindeki `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&nbsp;` gibi HTML karakter kodlarını otomatik çözer.
     pub fn text(content: &str) -> Self {
         DomNode {
-            node_type: NodeType::Text(content.to_string()),
+            node_type: NodeType::Text(decode_html_entities(content)),
             attributes: Vec::new(),
             children: Vec::new(),
         }
@@ -209,6 +210,43 @@ pub fn parse_html(raw: &str) -> DomNode {
     }
 }
 
+/// HTML içindeki özel karakter kodlarını (`&amp;`, `&nbsp;`, `&quot;` vb.)
+/// gerçek okunabilir karakterlere dönüştürür.
+pub fn decode_html_entities(input: &str) -> String {
+    input
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&nbsp;", " ")
+}
+
+/// DOM ağacındaki `<title>...</title>` etiketinin içindeki sayfa başlığını bulur.
+pub fn extract_title(node: &DomNode) -> Option<String> {
+    if let NodeType::Element(tag) = &node.node_type
+        && tag == "title"
+    {
+        for child in &node.children {
+            if let NodeType::Text(text) = &child.node_type {
+                let t = text.trim();
+                if !t.is_empty() {
+                    return Some(t.to_string());
+                }
+            }
+        }
+        return None;
+    }
+
+    for child in &node.children {
+        if let Some(title) = extract_title(child) {
+            return Some(title);
+        }
+    }
+    None
+}
+
 /// DOM ağacındaki tüm `<style>...</style>` etiketlerinin içindeki CSS metinlerini toplar.
 pub fn extract_styles(node: &DomNode) -> String {
     let mut css = String::new();
@@ -295,5 +333,15 @@ mod tests {
 
         let css = extract_styles(&kok);
         assert!(css.contains("h1 { color: #ff5733; }"));
+    }
+
+    #[test]
+    fn test_html_entity_ve_title_cikarma() {
+        let html = "<html><head><title>Anka &amp; Telek</title></head><body><p>A &lt; B &nbsp; &quot;OK&quot;</p></body></html>";
+        let kok = parse_html(html);
+
+        assert_eq!(extract_title(&kok), Some("Anka & Telek".to_string()));
+        let p_text = &kok.children[1].children[0].children[0].node_type;
+        assert_eq!(*p_text, NodeType::Text("A < B   \"OK\"".to_string()));
     }
 }
