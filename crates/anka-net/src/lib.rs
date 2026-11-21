@@ -7,6 +7,9 @@ use std::net::TcpStream;
 // Böylece anka-net, anka-url'in parçaladığı adresleri anlayabilir.
 use anka_url::Url;
 
+#[cfg(windows)]
+mod winhttp_tls;
+
 /// Tarayıcımız internete bağlanırken veya veri indirirken
 /// karşılaşabileceği tüm olası hata durumlarının listesi:
 #[derive(Debug)]
@@ -79,14 +82,26 @@ impl HttpResponse {
     }
 }
 
-/// Verilen `Url` adresine bağlanır ve sunucu `301 / 302 / 303 / 307 / 308`
+/// Verilen `Url` adresine bağlanır (`http` veya `https`) ve sunucu `301 / 302 / 303 / 307 / 308`
 /// yönlendirme yanıtı dönerse `Location:` başlığını otomatik takip eder (en fazla 5 kez).
 pub fn fetch(url: &Url) -> Result<HttpResponse, NetError> {
     const MAX_REDIRECTS: usize = 5;
     let mut current_url = url.clone();
 
     for _ in 0..=MAX_REDIRECTS {
-        // Tek bir HTTP isteği at
+        // HTTPS protokolü ise Windows'un yerel TLS 1.3 motorunu kullan
+        if current_url.scheme == "https" {
+            #[cfg(windows)]
+            {
+                return winhttp_tls::fetch_https(&current_url);
+            }
+            #[cfg(not(windows))]
+            {
+                return Err(NetError::UnsupportedScheme(current_url.scheme.clone()));
+            }
+        }
+
+        // Tek bir HTTP/1.1 isteği at
         let response = fetch_once(&current_url)?;
 
         // Sunucu "Bu sayfa taşındı (301/302/307/308)" dediyse ve zarfta "Location" varsa:
@@ -188,12 +203,53 @@ pub fn parse_http_response(raw: &str) -> Result<HttpResponse, NetError> {
         }
     }
 
-    // 4. ADIM: Hazırladığımız HttpResponse kutusunu döndür!
+    // 4. ADIM: Eğer sunucu veriyi parça parça (`Transfer-Encoding: chunked`) gönderdiyse birleştir!
+    let is_chunked = headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("transfer-encoding") && v.to_lowercase().contains("chunked")
+    });
+    let final_body = if is_chunked {
+        decode_chunked(body)?
+    } else {
+        body.to_string()
+    };
+
+    // 5. ADIM: Hazırladığımız HttpResponse kutusunu döndür!
     Ok(HttpResponse {
         status_code,
         headers,
-        body: body.to_string(),
+        body: final_body,
     })
+}
+
+/// `Transfer-Encoding: chunked` formatında gelen HTTP gövdesini birleştirir.
+/// Örnek: `"7\r\nMerhaba\r\n5\r\n Anka\r\n0\r\n\r\n"` -> `"Merhaba Anka"`
+pub fn decode_chunked(raw_body: &str) -> Result<String, NetError> {
+    let mut result = String::new();
+    let mut kalan = raw_body;
+
+    loop {
+        let Some((size_line, rest)) = kalan.split_once("\r\n") else {
+            return Err(NetError::InvalidResponse);
+        };
+        let size_hex = size_line.split(';').next().unwrap_or("").trim();
+        let chunk_size = usize::from_str_radix(size_hex, 16).map_err(|_| NetError::InvalidResponse)?;
+
+        // 0 uzunluğundaki parça verinin bittiğini gösterir
+        if chunk_size == 0 {
+            break;
+        }
+
+        if rest.len() < chunk_size {
+            return Err(NetError::InvalidResponse);
+        }
+
+        result.push_str(&rest[..chunk_size]);
+        kalan = rest[chunk_size..]
+            .strip_prefix("\r\n")
+            .unwrap_or(&rest[chunk_size..]);
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -236,5 +292,14 @@ mod tests {
             yanit.get_header("location"),
             Some("http://www.google.com/")
         );
+    }
+
+    #[test]
+    fn test_chunked_yanit_birlestirme() {
+        let chunked_yanit = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\nMerhaba\r\n5\r\n Anka\r\n0\r\n\r\n";
+        let yanit = parse_http_response(chunked_yanit).unwrap();
+
+        assert_eq!(yanit.status_code, 200);
+        assert_eq!(yanit.body, "Merhaba Anka");
     }
 }
