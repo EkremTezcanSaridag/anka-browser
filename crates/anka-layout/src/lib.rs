@@ -6,7 +6,7 @@ use anka_html::{DomNode, NodeType};
 /// Ekrana çizilecek tek bir kutunun koordinatlarını, boyutunu ve stilini tutan paket:
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutBox {
-    // Hangi HTML etiketi? (örn: "h1", "p")
+    // Hangi HTML etiketi? (örn: "h1", "p", "li")
     pub tag: String,
 
     // Kutunun içindeki yazı (örn: "Merhaba Anka!")
@@ -24,14 +24,49 @@ pub struct LayoutBox {
     // Kutunun yüksekliği (piksel)
     pub height: u32,
 
-    // Yazının rengi (örn: "red", "black", "blue")
+    // Yazının rengi (örn: "red", "black", "#ff5733")
     pub color: String,
+
+    // Kutunun arka plan rengi (varsa, örn: "#f1f5f9")
+    pub bg_color: Option<String>,
 
     // Yazının boyutu (piksel, örn: 32, 16)
     pub font_size: u32,
 
     // Eğer bu kutu bir link (<a>) ise hedef adresi
     pub href: Option<String>,
+}
+
+/// Uzun bir metni pencere genişliğine (`max_width`) ve yazı boyutuna (`font_size`) göre
+/// kelimeleri bölmeden otomatik olarak alt satırlara (`Vec<String>`) kaydırır (Word Wrap).
+pub fn wrap_text(text: &str, max_width: u32, font_size: u32) -> Vec<String> {
+    let char_width = (font_size / 2).max(6);
+    let max_chars = (max_width / char_width).max(16) as usize;
+
+    let mut lines = Vec::new();
+    let mut current_line = String::new();
+
+    for word in text.split_whitespace() {
+        if current_line.is_empty() {
+            current_line.push_str(word);
+        } else if current_line.chars().count() + 1 + word.chars().count() <= max_chars {
+            current_line.push(' ');
+            current_line.push_str(word);
+        } else {
+            lines.push(current_line);
+            current_line = word.to_string();
+        }
+    }
+
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+
+    if lines.is_empty() {
+        lines.push(text.to_string());
+    }
+
+    lines
 }
 
 /// HTML ağacını (`DomNode`) ve CSS kurallarını (`CssRule`) birleştirerek
@@ -98,15 +133,20 @@ fn layout_node(
                 _ => 16,
             };
 
-            // B) Varsayılan yazı rengi siyah olsun
+            // B) Varsayılan yazı rengi siyah, arka plan rengi yok (None)
             let mut color = "black".to_string();
+            let mut bg_color: Option<String> = None;
 
-            // C) CSS kurallarına bak: Bu etiket (örn: "h1") için özel renk veya boyut var mı?
+            // C) CSS kurallarına bak: Bu etiket (örn: "h1") için özel renk, arka plan veya boyut var mı?
             for rule in rules {
                 if rule.selector == current_tag {
                     for decl in &rule.declarations {
                         if decl.property == "color" {
                             color = decl.value.clone();
+                        } else if decl.property == "background-color"
+                            || decl.property == "background"
+                        {
+                            bg_color = Some(decl.value.clone());
                         } else if decl.property == "font-size" {
                             // "24px" yazısının sonundaki "px" harflerini silip sayıya çevir
                             let sayi_str = decl.value.trim_end_matches("px").trim();
@@ -118,26 +158,45 @@ fn layout_node(
                 }
             }
 
-            // D) Kutunun ekran koordinatlarını hesapla:
-            let x = 16; // Soldan 16 piksel boşluk
-            let y = *current_y;
-            let width = viewport_width.saturating_sub(32); // Sağdan ve soldan 16'şar piksel boşluk
-            let height = font_size + 8; // Yazı boyutuna 8 piksel satır payı ekle
+            // D) Liste elemanı (`<li>`) ise başına madde işareti (`• `) koy ve içeriden başlat:
+            let is_list_item = current_tag == "li";
+            let x = if is_list_item { 32 } else { 16 };
+            let width = viewport_width.saturating_sub(x + 16);
+            let height = font_size + 8;
 
-            boxes.push(LayoutBox {
-                tag: current_tag.to_string(),
-                text: text.clone(),
-                x,
-                y,
-                width,
-                height,
-                color,
-                font_size,
-                href: current_href.map(|s| s.to_string()),
-            });
+            let formatted_text = if is_list_item {
+                format!("• {text}")
+            } else {
+                text.clone()
+            };
 
-            // E) Bir sonraki kutu bunun üstüne binmesin diye `current_y` metresini aşağı kaydır!
-            *current_y += height + 12;
+            // E) Uzun cümleleri pencere genişliğine göre satırlara böl (Word Wrap):
+            let lines = wrap_text(&formatted_text, width, font_size);
+            let line_count = lines.len();
+
+            for (idx, line) in lines.into_iter().enumerate() {
+                let y = *current_y;
+                boxes.push(LayoutBox {
+                    tag: current_tag.to_string(),
+                    text: line,
+                    x,
+                    y,
+                    width,
+                    height,
+                    color: color.clone(),
+                    bg_color: bg_color.clone(),
+                    font_size,
+                    href: current_href.map(|s| s.to_string()),
+                });
+
+                // Aynı paragrafın alt satırları birbirine yakın (4px),
+                // yeni bir kutuya geçerken ise 12px boşluk bırak!
+                if idx + 1 < line_count {
+                    *current_y += height + 4;
+                } else {
+                    *current_y += height + 12;
+                }
+            }
         }
     }
 }
@@ -151,7 +210,7 @@ mod tests {
     #[test]
     fn test_html_ve_css_birlesik_yerlesim() {
         let html = "<body><h1>Merhaba Anka!</h1><p>Yerli Tarayici</p></body>";
-        let css = "h1 { color: red; font-size: 40px; } p { color: blue; }";
+        let css = "h1 { color: red; background-color: #f1f5f9; font-size: 40px; } p { color: blue; }";
 
         let dom = parse_html(html);
         let kurallar = parse_css(css);
@@ -167,6 +226,7 @@ mod tests {
         assert_eq!(kutular[0].x, 16);
         assert_eq!(kutular[0].y, 16);
         assert_eq!(kutular[0].color, "red");
+        assert_eq!(kutular[0].bg_color, Some("#f1f5f9".to_string()));
         assert_eq!(kutular[0].font_size, 40);
         assert_eq!(kutular[0].height, 48); // 40 + 8
 
@@ -175,6 +235,18 @@ mod tests {
         assert_eq!(kutular[1].text, "Yerli Tarayici");
         assert_eq!(kutular[1].y, 76);
         assert_eq!(kutular[1].color, "blue");
-        assert_eq!(kutular[1].font_size, 16); // p için varsayılan boyut
+        assert_eq!(kutular[1].font_size, 16);
+    }
+
+    #[test]
+    fn test_uzun_metin_satir_kaydirma_ve_liste() {
+        let html = "<ul><li>Bu cok uzun bir liste maddesidir ve dar ekranda alt satira kaymalidir</li></ul>";
+        let dom = parse_html(html);
+        // 220px dar ekranda satır kaydırmayı test et:
+        let kutular = compute_layout(&dom, &[], 220);
+
+        assert!(kutular.len() >= 2);
+        assert!(kutular[0].text.starts_with("• "));
+        assert_eq!(kutular[0].x, 32);
     }
 }
