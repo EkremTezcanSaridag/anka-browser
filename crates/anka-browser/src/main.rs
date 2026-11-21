@@ -1,7 +1,7 @@
 // Anka Browser - Ana Tarayıcı Uygulaması (6 İstasyonlu Motor + Yerel Masaüstü Penceresi)
 
 use anka_css::parse_css;
-use anka_html::parse_html;
+use anka_html::{extract_styles, parse_html};
 use anka_layout::compute_layout;
 use anka_net::{fetch, parse_http_response};
 use anka_paint::{PaintCommand, build_display_list};
@@ -29,7 +29,11 @@ pub fn motoru_calistir(hedef_adres: &str) -> (String, Vec<PaintCommand>) {
         let dahili_http = concat!(
             "HTTP/1.1 200 OK\r\n",
             "Content-Type: text/html\r\n\r\n",
-            "<html><body>",
+            "<html><head><style>",
+            "h1 { color: #dc2626; font-size: 32px; }",
+            "h2 { color: #1d4ed8; font-size: 20px; }",
+            "p  { color: #334155; font-size: 16px; }",
+            "</style></head><body>",
             "<h1>Anka Browser'a Hos Geldiniz!</h1>",
             "<h2>Sifirdan Rust ile Yazilan Yerli Web Motoru (Telek Engine v0.1)</h2>",
             "<p>Su an hicbir hazir tarayici motoru veya agir GUI kutuphanesi olmadan, kendi yazdiginiz</p>",
@@ -54,14 +58,18 @@ pub fn motoru_calistir(hedef_adres: &str) -> (String, Vec<PaintCommand>) {
     // İSTASYON 3: anka-html (HTML Metnini DOM Ağacına Çevirme)
     let dom_agaci = parse_html(&yanit.body);
 
-    // İSTASYON 4: anka-css (Varsayılan Tarayıcı Stillerini Ayrıştırma)
+    // İSTASYON 4: anka-css (Varsayılan Tarayıcı Stilleri + Sayfanın Kendi `<style>` Kuralları)
     let varsayilan_css = "
         h1 { color: red; font-size: 30px; }
         h2 { color: blue; font-size: 22px; }
         p  { color: black; font-size: 16px; }
         a  { color: blue; font-size: 16px; }
     ";
-    let css_kurallari = parse_css(varsayilan_css);
+    let mut css_kurallari = parse_css(varsayilan_css);
+    let sayfa_css = extract_styles(&dom_agaci);
+    if !sayfa_css.trim().is_empty() {
+        css_kurallari.extend(parse_css(&sayfa_css));
+    }
 
     // İSTASYON 5: anka-layout (Kutuların Ekrandaki X, Y Koordinatlarını Hesaplama)
     let yerlesim_kutulari = compute_layout(&dom_agaci, &css_kurallari, 860);
