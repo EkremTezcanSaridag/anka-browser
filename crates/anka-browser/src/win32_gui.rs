@@ -152,6 +152,7 @@ unsafe extern "system" {
     fn BeginPaint(hWnd: HWND, lpPaint: *mut PAINTSTRUCT) -> HDC;
     fn EndPaint(hWnd: HWND, lpPaint: *const PAINTSTRUCT) -> i32;
     fn FillRect(hdc: HDC, lprc: *const RECT, hbr: HBRUSH) -> i32;
+    fn FrameRect(hdc: HDC, lprc: *const RECT, hbr: HBRUSH) -> i32;
     fn GetClientRect(hWnd: HWND, lpRect: *mut RECT) -> i32;
     fn InvalidateRect(hWnd: HWND, lpRect: *const RECT, bErase: i32) -> i32;
     fn GetWindowTextW(hWnd: HWND, lpString: *mut u16, nMaxCount: i32) -> i32;
@@ -242,8 +243,8 @@ fn sayfayi_yukle_ve_yenile(hwnd: HWND, adres: &str, gecmise_ekle: bool) {
 
     // Pencere başlığını sayfanın gerçek `<title>` etiketiyle güncelle!
     let pencere_basligi = match sayfa_basligi {
-        Some(t) => format!("{t} — Anka Browser v0.2.1"),
-        None => "Anka Browser v0.2.1 — Telek Engine".to_string(),
+        Some(t) => format!("{t} — Anka Browser v0.2.2"),
+        None => "Anka Browser v0.2.2 — Telek Engine".to_string(),
     };
     let wide_title = to_wide(&pencere_basligi);
     unsafe {
@@ -508,6 +509,7 @@ unsafe extern "system" fn wnd_proc(
         }
 
         WM_MOUSEMOVE => {
+            let mouse_x = (lparam & 0xFFFF) as i16 as i32;
             let mouse_y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
             let link_var_mi = {
                 let guard = DURUM.lock().ok();
@@ -515,9 +517,14 @@ unsafe extern "system" fn wnd_proc(
                     g.as_ref().is_some_and(|st| {
                         st.cizim_listesi.iter().any(|komut| {
                             if komut.href.is_some() {
+                                let draw_x = komut.x as i32 + 4;
+                                let draw_right = draw_x + komut.width as i32;
                                 let draw_y = TOOLBAR_HEIGHT + komut.y as i32 - st.scroll_y;
                                 let draw_bottom = draw_y + komut.height as i32;
-                                mouse_y >= draw_y && mouse_y <= draw_bottom
+                                mouse_x >= draw_x
+                                    && mouse_x <= draw_right
+                                    && mouse_y >= draw_y
+                                    && mouse_y <= draw_bottom
                             } else {
                                 false
                             }
@@ -534,6 +541,7 @@ unsafe extern "system" fn wnd_proc(
         }
 
         WM_LBUTTONDOWN => {
+            let click_x = (lparam & 0xFFFF) as i16 as i32;
             let click_y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
             let hedef_link = {
                 let guard = DURUM.lock().ok();
@@ -542,9 +550,13 @@ unsafe extern "system" fn wnd_proc(
                         let base_url = anka_url::Url::parse(&st.current_url).ok()?;
                         for komut in &st.cizim_listesi {
                             if let Some(href) = &komut.href {
+                                let draw_x = komut.x as i32 + 4;
+                                let draw_right = draw_x + komut.width as i32;
                                 let draw_y = TOOLBAR_HEIGHT + komut.y as i32 - st.scroll_y;
                                 let draw_bottom = draw_y + komut.height as i32;
-                                if click_y >= draw_y
+                                if click_x >= draw_x
+                                    && click_x <= draw_right
+                                    && click_y >= draw_y
                                     && click_y <= draw_bottom
                                     && let Ok(resolved) = base_url.resolve(href)
                                 {
@@ -670,26 +682,37 @@ unsafe extern "system" fn wnd_proc(
                         let draw_y = TOOLBAR_HEIGHT + komut.y as i32 - st.scroll_y;
 
                         if draw_y >= TOOLBAR_HEIGHT && draw_y < client.bottom - STATUS_HEIGHT - 12 {
+                            let box_rect = RECT {
+                                left: draw_x - 4,
+                                top: draw_y - 2,
+                                right: (draw_x + komut.width as i32).min(client.right - 16),
+                                bottom: draw_y + komut.height as i32,
+                            };
+
                             // Eğer kutunun CSS arka plan rengi (`background-color`) varsa önce kutuyu boya!
                             if let Some(bg) = &komut.bg_color {
-                                let bg_rect = RECT {
-                                    left: draw_x - 4,
-                                    top: draw_y - 2,
-                                    right: (draw_x + komut.width as i32).min(client.right - 16),
-                                    bottom: draw_y + komut.height as i32,
-                                };
                                 let bg_brush = CreateSolidBrush(rgb(bg.r, bg.g, bg.b));
-                                FillRect(hdc, &bg_rect, bg_brush);
+                                FillRect(hdc, &box_rect, bg_brush);
                                 DeleteObject(bg_brush as HGDIOBJ);
                             }
 
-                            TextOutW(
-                                hdc,
-                                draw_x,
-                                draw_y,
-                                wide_text.as_ptr(),
-                                (wide_text.len() - 1) as i32,
-                            );
+                            // Eğer kutunun CSS çerçevesi (`border`) varsa etrafına çerçeve çiz!
+                            if let Some(border) = &komut.border_color {
+                                let border_brush =
+                                    CreateSolidBrush(rgb(border.r, border.g, border.b));
+                                FrameRect(hdc, &box_rect, border_brush);
+                                DeleteObject(border_brush as HGDIOBJ);
+                            }
+
+                            if !komut.text.is_empty() {
+                                TextOutW(
+                                    hdc,
+                                    draw_x + 4,
+                                    draw_y + 2,
+                                    wide_text.as_ptr(),
+                                    (wide_text.len() - 1) as i32,
+                                );
+                            }
                         }
 
                         SelectObject(hdc, old_font);
@@ -764,8 +787,8 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) {
         let hinst = GetModuleHandleW(null());
         let class_name = to_wide("AnkaBrowserWindowClass");
         let title_str = match sayfa_basligi {
-            Some(t) => format!("{t} — Anka Browser v0.2.1"),
-            None => "Anka Browser v0.2.1 — Telek Engine".to_string(),
+            Some(t) => format!("{t} — Anka Browser v0.2.2"),
+            None => "Anka Browser v0.2.2 — Telek Engine".to_string(),
         };
         let title = to_wide(&title_str);
 
