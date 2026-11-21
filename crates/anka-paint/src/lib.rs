@@ -70,6 +70,7 @@ pub struct PaintCommand {
     pub font_size: u32,
     pub color: RgbColor,
     pub bg_color: Option<RgbColor>,
+    pub border_color: Option<RgbColor>,
     pub href: Option<String>,
 }
 
@@ -89,6 +90,7 @@ pub fn build_display_list(boxes: &[LayoutBox]) -> Vec<PaintCommand> {
             font_size: b.font_size,
             color: RgbColor::from_css_name(&b.color),
             bg_color: b.bg_color.as_deref().map(RgbColor::from_css_name),
+            border_color: b.border_color.as_deref().map(RgbColor::from_css_name),
             href: b.href.clone(),
         });
     }
@@ -111,6 +113,7 @@ mod tests {
             height: 48,
             color: "red".to_string(),
             bg_color: Some("#f1f5f9".to_string()),
+            border_color: Some("#cbd5e1".to_string()),
             font_size: 40,
             href: None,
         }];
