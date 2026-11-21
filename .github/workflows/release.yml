@@ -1,0 +1,35 @@
+# Anka Browser - Otomatik Sürüm (GitHub Release) Yayınlama Robotu
+# v* etiketi (örn: v0.1.0-alpha) gönderildiğinde Windows .exe derleyip Releases'ta yayınlar.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build Windows Release & Publish
+    runs-on: windows-latest
+
+    steps:
+      - name: Depoyu indir (Checkout)
+        uses: actions/checkout@v4
+
+      - name: Rust derleyicisini kur (Toolchain)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Optimize edilmiş Windows uygulamasını derle
+        run: cargo build --release -p anka-browser
+
+      - name: GitHub Release oluştur ve anka-browser.exe dosyasını ekle
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Anka Browser ${{ github.ref_name }} (Telek Engine)"
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            target/release/anka-browser.exe
