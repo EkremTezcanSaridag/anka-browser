@@ -209,6 +209,31 @@ pub fn parse_html(raw: &str) -> DomNode {
     }
 }
 
+/// DOM ağacındaki tüm `<style>...</style>` etiketlerinin içindeki CSS metinlerini toplar.
+pub fn extract_styles(node: &DomNode) -> String {
+    let mut css = String::new();
+    collect_styles(node, &mut css);
+    css
+}
+
+fn collect_styles(node: &DomNode, out: &mut String) {
+    if let NodeType::Element(tag) = &node.node_type
+        && tag == "style"
+    {
+        for child in &node.children {
+            if let NodeType::Text(text) = &child.node_type {
+                out.push_str(text);
+                out.push('\n');
+            }
+        }
+        return;
+    }
+
+    for child in &node.children {
+        collect_styles(child, out);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,5 +286,14 @@ mod tests {
         let link = &kok.children[0];
         assert_eq!(link.node_type, NodeType::Element("a".to_string()));
         assert_eq!(link.get_attribute("href"), Some("Status.html"));
+    }
+
+    #[test]
+    fn test_style_etiketi_css_cikarma() {
+        let html = "<html><head><style>h1 { color: #ff5733; }</style></head><body><h1>Anka</h1></body></html>";
+        let kok = parse_html(html);
+
+        let css = extract_styles(&kok);
+        assert!(css.contains("h1 { color: #ff5733; }"));
     }
 }
