@@ -9,7 +9,7 @@ Bu doküman, geliştirme ortamı **Windows'tan Milis Linux'a** taşınırken Ant
 - **Motor Adı:** Telek Engine (*Anka kuşunun uçmasını sağlayan ana kanat tüyü*)
 - **GitHub Deposu:** `https://github.com/EkremTezcanSaridag/anka-browser`
 - **Dil & Yapı:** Rust (`edition = "2024"`, Cargo Workspace / Monorepo, Lisans: `MPL-2.0`)
-- **Mevcut Son Sürüm:** `v0.2.5` (29/29 birim testi başarılı, sıfır `clippy` uyarısı, sıfır üçüncü parti crate bağımlılığı)
+- **Mevcut Son Sürüm:** `v0.2.6` (31/31 birim testi başarılı, sıfır `clippy` uyarısı, sıfır üçüncü parti crate ve sıfır Linux `-dev` paketi bağımlılığı)
 - **Temel Felsefe:** Hazır bir Chromium/WebKit/Gecko fork'u veya WebView kabuğu **değildir**. URL ayrıştırmadan ağ katmanına, HTML/DOM ağacından CSS, Layout ve Paint aşamasına kadar tüm boru hattı (pipeline) sıfırdan, eğitici ve anlaşılır Türkçe yorum satırlarıyla yazılmaktadır.
 
 ---

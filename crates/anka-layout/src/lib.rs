@@ -1,4 +1,10 @@
-// Anka Browser - Sayfa Yerleşimi ve Kutu Modeli Motoru (İstasyon 5)
+// Anka Browser - Sayfa Yerleşimi, CSS Kutu Modeli ve Flexbox Motoru (İstasyon 5 - v0.2.6)
+// Desteklenen özellikler:
+// - Seçici eşleştirme (`tag`, `.class`, `#id`, `tag.class`, `h1, h2`) ve satır içi `style="..."`
+// - CSS Kutu Modeli: `padding`, `margin`, `text-align` (`left` | `center` | `right`), `background-color`, `border`
+// - Çok satırlı kart / paragraf birleştirme (satırlar ayrı çerçevelere bölünmez, tek kart içinde toplanır!)
+// - CSS Flexbox (`display: flex` ve `gap`): Çocuk kutuları (kartlar, sütunlar) yatayda eşit genişlikle yan yana dizer!
+// - Otomatik satır kaydırma (`wrap_text`), `<li>`, `<hr>`, `<img src alt width height>` ve inline `<a>`/`<span>`
 
 use anka_css::{CssRule, Declaration, parse_css};
 use anka_html::{DomNode, NodeType};
@@ -6,10 +12,10 @@ use anka_html::{DomNode, NodeType};
 /// Ekrana çizilecek tek bir kutunun koordinatlarını, boyutunu ve stilini tutan paket:
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutBox {
-    // Hangi HTML etiketi? (örn: "h1", "p", "li", "hr")
+    // Hangi HTML etiketi? (örn: "h1", "p", "li", "hr", "img", "box")
     pub tag: String,
 
-    // Kutunun içindeki yazı (örn: "Merhaba Anka!")
+    // Kutunun içindeki yazı (örn: "Merhaba Anka!") — arka plan kapsayıcı kutularda boş olabilir
     pub text: String,
 
     // Ekranın sol kenarından uzaklığı (piksel)
@@ -36,11 +42,47 @@ pub struct LayoutBox {
     // Yazının boyutu (piksel, örn: 32, 16)
     pub font_size: u32,
 
+    // CSS `padding` (kutu iç boşluğu, piksel)
+    pub padding: u32,
+
+    // CSS `text-align` ("left", "center", "right")
+    pub text_align: String,
+
     // Eğer bu kutu bir link (<a>) ise hedef adresi
     pub href: Option<String>,
 
     // Eğer bu kutu bir görsel (<img>) ise kaynak adresi (`src="..."`)
     pub image_src: Option<String>,
+}
+
+/// Bir HTML düğümüne uygulanmış CSS özelliklerinin çözümlenmiş paketi:
+#[derive(Clone)]
+struct ResolvedStyle {
+    color: String,
+    bg_color: Option<String>,
+    border_color: Option<String>,
+    font_size: u32,
+    padding: u32,
+    margin: u32,
+    gap: u32,
+    display: String,
+    text_align: String,
+}
+
+impl Default for ResolvedStyle {
+    fn default() -> Self {
+        Self {
+            color: "black".to_string(),
+            bg_color: None,
+            border_color: None,
+            font_size: 16,
+            padding: 0,
+            margin: 0,
+            gap: 12,
+            display: "block".to_string(),
+            text_align: "left".to_string(),
+        }
+    }
 }
 
 /// Ağaçta yukarıdan aşağıya inerken ebeveyn etiketlerden miras alınan bağlam bilgisi:
@@ -51,6 +93,9 @@ struct NodeContext {
     classes: Vec<String>,
     inline_declarations: Vec<Declaration>,
     href: Option<String>,
+    text_align: Option<String>,
+    /// Üst kapsayıcı (örn: `.kart` veya `#duyuru`) zaten arka plan/çerçeve çizdiyse çocuk metinler tekrar çerçeve çizmez!
+    container_painted_bg: bool,
 }
 
 /// Bir CSS seçicisinin (`h1`, `.kart`, `#baslik`, `div.kart`, `h1, h2`)
@@ -61,26 +106,19 @@ pub fn selector_matches(selector: &str, tag: &str, id: Option<&str>, classes: &[
         if s.is_empty() {
             continue;
         }
-        // 1. ".kart" -> class eşleşmesi
         if let Some(cls) = s.strip_prefix('.') {
             if classes.iter().any(|c| c == cls) {
                 return true;
             }
-        }
-        // 2. "#baslik" -> id eşleşmesi
-        else if let Some(target_id) = s.strip_prefix('#') {
+        } else if let Some(target_id) = s.strip_prefix('#') {
             if id == Some(target_id) {
                 return true;
             }
-        }
-        // 3. "div.kart" -> hem etiket hem class eşleşmesi
-        else if let Some((t, cls)) = s.split_once('.') {
+        } else if let Some((t, cls)) = s.split_once('.') {
             if t == tag && classes.iter().any(|c| c == cls) {
                 return true;
             }
-        }
-        // 4. "h1" -> doğrudan etiket eşleşmesi
-        else if s == tag {
+        } else if s == tag {
             return true;
         }
     }
@@ -97,11 +135,101 @@ fn extract_border_color(val: &str) -> Option<String> {
     }
 }
 
-/// Uzun bir metni pencere genişliğine (`max_width`) ve yazı boyutuna (`font_size`) göre
+/// CSS piksel değerini (`"12px"`, `"16"`, `"10px 20px"` -> ilk sayı `10`) güvenli şekilde `u32` olarak çözer.
+fn parse_px(val: &str) -> Option<u32> {
+    let first = val.split_whitespace().next()?.trim();
+    first.trim_end_matches("px").trim().parse::<u32>().ok()
+}
+
+/// Tek bir CSS bildirimini (`Declaration`) `ResolvedStyle` yapısına uygular.
+fn apply_declaration(decl: &Declaration, style: &mut ResolvedStyle) {
+    match decl.property.as_str() {
+        "color" => style.color = decl.value.clone(),
+        "background-color" | "background" => style.bg_color = Some(decl.value.clone()),
+        "border" | "border-color" => style.border_color = extract_border_color(&decl.value),
+        "font-size" => {
+            if let Some(px) = parse_px(&decl.value) {
+                style.font_size = px.clamp(10, 64);
+            }
+        }
+        "padding" | "padding-top" | "padding-left" => {
+            if let Some(px) = parse_px(&decl.value) {
+                style.padding = px.min(48);
+            }
+        }
+        "margin" | "margin-top" | "margin-bottom" => {
+            if let Some(px) = parse_px(&decl.value) {
+                style.margin = px.min(48);
+            }
+        }
+        "gap" => {
+            if let Some(px) = parse_px(&decl.value) {
+                style.gap = px.min(48);
+            }
+        }
+        "display" => style.display = decl.value.trim().to_lowercase(),
+        "text-align" => style.text_align = decl.value.trim().to_lowercase(),
+        _ => {}
+    }
+}
+
+/// Belirli bir elementin (etiket + id + class + inline style) kendi doğrudan CSS stillerini hesaplar.
+fn resolve_element_style(
+    tag: &str,
+    id: Option<&str>,
+    classes: &[String],
+    inline_decls: &[Declaration],
+    rules: &[CssRule],
+) -> ResolvedStyle {
+    let mut style = ResolvedStyle {
+        font_size: match tag {
+            "h1" => 32,
+            "h2" => 24,
+            "h3" => 20,
+            _ => 16,
+        },
+        ..Default::default()
+    };
+
+    for rule in rules {
+        if selector_matches(&rule.selector, tag, id, classes) {
+            for decl in &rule.declarations {
+                apply_declaration(decl, &mut style);
+            }
+        }
+    }
+    for decl in inline_decls {
+        apply_declaration(decl, &mut style);
+    }
+
+    style
+}
+
+/// Bir element düğümünün doğrudan `id`, `class` ve satır içi `style` özelliklerini ayıklar.
+fn extract_own_attrs(node: &DomNode) -> (Option<String>, Vec<String>, Vec<Declaration>) {
+    let id = node
+        .get_attribute("id")
+        .map(|v| v.trim().to_lowercase())
+        .filter(|v| !v.is_empty());
+    let classes: Vec<String> = node
+        .get_attribute("class")
+        .map(|v| v.split_whitespace().map(str::to_lowercase).collect())
+        .unwrap_or_default();
+    let mut inline_decls = Vec::new();
+    if let Some(style_val) = node.get_attribute("style") {
+        let parsed = parse_css(&format!("inline {{ {style_val} }}"));
+        if let Some(first_rule) = parsed.into_iter().next() {
+            inline_decls.extend(first_rule.declarations);
+        }
+    }
+    (id, classes, inline_decls)
+}
+
+/// Uzun bir metni kutu genişliğine (`max_width`) ve yazı boyutuna (`font_size`) göre
 /// kelimeleri bölmeden otomatik olarak alt satırlara (`Vec<String>`) kaydırır (Word Wrap).
 pub fn wrap_text(text: &str, max_width: u32, font_size: u32) -> Vec<String> {
-    let char_width = (font_size / 2).max(6);
-    let max_chars = (max_width / char_width).max(16) as usize;
+    let char_width = ((font_size * 58) / 100).max(7);
+    let max_chars = (max_width / char_width).max(12) as usize;
 
     let mut lines = Vec::new();
     let mut current_line = String::new();
@@ -134,7 +262,9 @@ pub fn wrap_text(text: &str, max_width: u32, font_size: u32) -> Vec<String> {
 pub fn compute_layout(root: &DomNode, rules: &[CssRule], viewport_width: u32) -> Vec<LayoutBox> {
     let mut boxes = Vec::new();
     let mut current_y: u32 = 16;
-    let mut inline_x: u32 = 16;
+    let base_x: u32 = 16;
+    let avail_width = viewport_width.saturating_sub(32).max(120);
+    let mut inline_x: u32 = base_x;
     let mut last_inline_height: u32 = 0;
 
     let initial_ctx = NodeContext {
@@ -146,7 +276,8 @@ pub fn compute_layout(root: &DomNode, rules: &[CssRule], viewport_width: u32) ->
         root,
         &initial_ctx,
         rules,
-        viewport_width,
+        base_x,
+        avail_width,
         &mut current_y,
         &mut inline_x,
         &mut last_inline_height,
@@ -161,7 +292,8 @@ fn layout_node(
     node: &DomNode,
     ctx: &NodeContext,
     rules: &[CssRule],
-    viewport_width: u32,
+    base_x: u32,
+    avail_width: u32,
     current_y: &mut u32,
     inline_x: &mut u32,
     last_inline_height: &mut u32,
@@ -175,22 +307,24 @@ fn layout_node(
 
             // `<hr>` etiketi: Boydan boya yatay ayırıcı çizgi kutusu!
             if tag_name == "hr" {
-                if *inline_x > 16 {
+                if *inline_x > base_x {
                     *current_y += *last_inline_height + 12;
-                    *inline_x = 16;
+                    *inline_x = base_x;
                     *last_inline_height = 0;
                 }
                 boxes.push(LayoutBox {
                     tag: "hr".to_string(),
                     text: String::new(),
-                    x: 16,
+                    x: base_x,
                     y: *current_y + 4,
-                    width: viewport_width.saturating_sub(32),
+                    width: avail_width,
                     height: 2,
                     color: "#cbd5e1".to_string(),
                     bg_color: Some("#cbd5e1".to_string()),
                     border_color: None,
                     font_size: 4,
+                    padding: 0,
+                    text_align: "left".to_string(),
                     href: None,
                     image_src: None,
                 });
@@ -199,18 +333,17 @@ fn layout_node(
             }
 
             // `<img src="..." alt="..." width="..." height="...">` etiketi:
-            // Görselin ekrandaki yerini ve boyutunu hesaplayıp kutu olarak yerleştir!
             if tag_name == "img" {
-                if *inline_x > 16 {
+                if *inline_x > base_x {
                     *current_y += *last_inline_height + 12;
-                    *inline_x = 16;
+                    *inline_x = base_x;
                     *last_inline_height = 0;
                 }
 
                 let src = node.get_attribute("src").unwrap_or("").trim().to_string();
                 let alt = node.get_attribute("alt").unwrap_or("").trim();
 
-                let max_img_w = viewport_width.saturating_sub(32).max(120);
+                let max_img_w = avail_width.max(80);
                 let img_w = node
                     .get_attribute("width")
                     .and_then(|w| w.trim_end_matches("px").trim().parse::<u32>().ok())
@@ -234,7 +367,7 @@ fn layout_node(
                 boxes.push(LayoutBox {
                     tag: "img".to_string(),
                     text: etiket_yazisi,
-                    x: 16,
+                    x: base_x,
                     y: *current_y,
                     width: img_w,
                     height: img_h,
@@ -242,6 +375,8 @@ fn layout_node(
                     bg_color: Some("#f1f5f9".to_string()),
                     border_color: Some("#94a3b8".to_string()),
                     font_size: 14,
+                    padding: 0,
+                    text_align: "left".to_string(),
                     href: ctx.href.clone(),
                     image_src: if src.is_empty() { None } else { Some(src) },
                 });
@@ -252,43 +387,170 @@ fn layout_node(
 
             // Blok etiketine girerken açıkta kalan yan yana (inline) satırı kapat:
             let is_inline_tag = matches!(tag_name.as_str(), "a" | "span" | "button" | "b" | "i");
-            if !is_inline_tag && *inline_x > 16 {
+            if !is_inline_tag && *inline_x > base_x {
                 *current_y += *last_inline_height + 12;
-                *inline_x = 16;
+                *inline_x = base_x;
                 *last_inline_height = 0;
             }
 
-            // Etiketin class="...", id="...", style="...", href="..." özelliklerini miras al:
+            // Elementin kendi doğrudan CSS özelliklerini (`display: flex`, `padding`, `margin`, arka plan) çöz:
+            let (own_id, own_classes, own_inline) = extract_own_attrs(node);
+            let own_style = resolve_element_style(
+                tag_name,
+                own_id.as_deref(),
+                &own_classes,
+                &own_inline,
+                rules,
+            );
+
+            // Ebeveyn bağlamını miras alarak çocuklara aktarılacak `next_ctx` oluştur:
             let mut next_ctx = ctx.clone();
             next_ctx.tag = tag_name.clone();
-
-            if let Some(id_val) = node.get_attribute("id") {
-                next_ctx.id = Some(id_val.trim().to_lowercase());
+            if let Some(id_val) = own_id {
+                next_ctx.id = Some(id_val);
             }
-            if let Some(class_val) = node.get_attribute("class") {
-                for c in class_val.split_whitespace() {
-                    let c_low = c.to_lowercase();
-                    if !next_ctx.classes.contains(&c_low) {
-                        next_ctx.classes.push(c_low);
-                    }
+            for c in own_classes {
+                if !next_ctx.classes.contains(&c) {
+                    next_ctx.classes.push(c);
                 }
             }
-            if let Some(style_val) = node.get_attribute("style") {
-                let parsed = parse_css(&format!("inline {{ {style_val} }}"));
-                if let Some(first_rule) = parsed.into_iter().next() {
-                    next_ctx.inline_declarations.extend(first_rule.declarations);
-                }
-            }
+            next_ctx.inline_declarations.extend(own_inline);
             if let Some(href_val) = node.get_attribute("href") {
                 next_ctx.href = Some(href_val.to_string());
             }
+            if own_style.text_align != "left" {
+                next_ctx.text_align = Some(own_style.text_align.clone());
+            }
 
+            // Dış boşluk (margin-top) uygula:
+            if !is_inline_tag && own_style.margin > 0 {
+                *current_y += own_style.margin;
+            }
+
+            // =================================================================
+            // 1. CSS FLEXBOX (`display: flex`) YATAY SÜTUN YERLEŞİMİ!
+            // =================================================================
+            if own_style.display == "flex" {
+                let flex_items: Vec<&DomNode> = node
+                    .children
+                    .iter()
+                    .filter(|ch| matches!(ch.node_type, NodeType::Element(_)))
+                    .collect();
+
+                if !flex_items.is_empty() {
+                    let count = flex_items.len() as u32;
+                    let gap = own_style.gap;
+                    let total_gaps = gap.saturating_mul(count.saturating_sub(1));
+                    let col_width = avail_width.saturating_sub(total_gaps) / count;
+                    let start_y = *current_y;
+                    let mut max_bottom_y = start_y;
+
+                    for (idx, item) in flex_items.iter().enumerate() {
+                        let col_x = base_x + (idx as u32) * (col_width + gap);
+                        let mut col_y = start_y;
+                        let mut col_inline_x = col_x;
+                        let mut col_inline_h = 0;
+
+                        layout_node(
+                            item,
+                            &next_ctx,
+                            rules,
+                            col_x,
+                            col_width.max(80),
+                            &mut col_y,
+                            &mut col_inline_x,
+                            &mut col_inline_h,
+                            boxes,
+                        );
+                        if col_y > max_bottom_y {
+                            max_bottom_y = col_y;
+                        }
+                    }
+
+                    *current_y = max_bottom_y + own_style.margin;
+                    return;
+                }
+            }
+
+            // =================================================================
+            // 2. KAPSAYICI KART / KUTU (Container Box):
+            // Eğer `<div>`, `<section>`, `<article>` gibi bir kapsayıcı arka plan (`bg_color`)
+            // veya çerçeve (`border_color`) aldıysa, içindeki tüm çok-satırlı metinleri
+            // TEK BİR BÜTÜN KART ÇERÇEVESİ içinde çiz!
+            // =================================================================
+            let is_box_container = matches!(
+                tag_name.as_str(),
+                "div" | "section" | "article" | "header" | "footer" | "main"
+            ) && (own_style.bg_color.is_some()
+                || own_style.border_color.is_some());
+
+            if is_box_container {
+                let pad = own_style.padding.max(8);
+                let box_start_y = *current_y;
+                // Önce kapsayıcı arka plan kutusunu `boxes` listesine yer tutucu olarak ekle
+                // (böylece çocuklar çizildikten sonra yüksekliği kesinleşir ve metinlerin ARKASINDA kalır!)
+                let container_idx = boxes.len();
+                boxes.push(LayoutBox {
+                    tag: tag_name.clone(),
+                    text: String::new(),
+                    x: base_x,
+                    y: box_start_y,
+                    width: avail_width,
+                    height: 0,
+                    color: own_style.color.clone(),
+                    bg_color: own_style.bg_color.clone(),
+                    border_color: own_style.border_color.clone(),
+                    font_size: own_style.font_size,
+                    padding: pad,
+                    text_align: own_style.text_align.clone(),
+                    href: None,
+                    image_src: None,
+                });
+
+                next_ctx.container_painted_bg = true;
+                *current_y += pad;
+                let inner_x = base_x + pad;
+                let inner_w = avail_width.saturating_sub(pad * 2).max(80);
+                let mut inner_inline_x = inner_x;
+                let mut inner_inline_h = 0;
+
+                for child in &node.children {
+                    layout_node(
+                        child,
+                        &next_ctx,
+                        rules,
+                        inner_x,
+                        inner_w,
+                        current_y,
+                        &mut inner_inline_x,
+                        &mut inner_inline_h,
+                        boxes,
+                    );
+                }
+
+                if inner_inline_x > inner_x {
+                    *current_y += inner_inline_h + 8;
+                }
+
+                // Kapsayıcının toplam yüksekliğini içindeki çocuklara göre tam ayarla:
+                let content_end_y = (*current_y).saturating_sub(4);
+                let total_h = content_end_y
+                    .saturating_sub(box_start_y)
+                    .saturating_add(pad)
+                    .max(pad * 2 + 16);
+                boxes[container_idx].height = total_h;
+                *current_y = box_start_y + total_h + own_style.margin.max(12);
+                return;
+            }
+
+            // Normal blok / inline element çocuklarını gez:
             for child in &node.children {
                 layout_node(
                     child,
                     &next_ctx,
                     rules,
-                    viewport_width,
+                    base_x,
+                    avail_width,
                     current_y,
                     inline_x,
                     last_inline_height,
@@ -296,91 +558,54 @@ fn layout_node(
                 );
             }
 
-            if !is_inline_tag && *inline_x > 16 {
+            if !is_inline_tag && *inline_x > base_x {
                 *current_y += *last_inline_height + 12;
-                *inline_x = 16;
+                *inline_x = base_x;
                 *last_inline_height = 0;
+            }
+            if !is_inline_tag && own_style.margin > 0 {
+                *current_y += own_style.margin;
             }
         }
 
         NodeType::Text(text) => {
             let current_tag = ctx.tag.as_str();
-            let mut font_size: u32 = match current_tag {
-                "h1" => 32,
-                "h2" => 24,
-                "h3" => 20,
-                _ => 16,
-            };
-            let mut color = "black".to_string();
-            let mut bg_color: Option<String> = None;
-            let mut border_color: Option<String> = None;
+            let mut style = resolve_element_style(
+                current_tag,
+                ctx.id.as_deref(),
+                &ctx.classes,
+                &ctx.inline_declarations,
+                rules,
+            );
 
-            let apply_decl = |decl: &Declaration,
-                              color: &mut String,
-                              bg_color: &mut Option<String>,
-                              border_color: &mut Option<String>,
-                              font_size: &mut u32| {
-                match decl.property.as_str() {
-                    "color" => *color = decl.value.clone(),
-                    "background-color" | "background" => *bg_color = Some(decl.value.clone()),
-                    "border" | "border-color" => {
-                        *border_color = extract_border_color(&decl.value);
-                    }
-                    "font-size" => {
-                        let sayi_str = decl.value.trim_end_matches("px").trim();
-                        if let Ok(boyut) = sayi_str.parse::<u32>() {
-                            *font_size = boyut;
-                        }
-                    }
-                    _ => {}
-                }
-            };
-
-            // 1. Sayfa CSS kurallarını (etiket, .class, #id) sırayla uygula:
-            for rule in rules {
-                if selector_matches(
-                    &rule.selector,
-                    current_tag,
-                    ctx.id.as_deref(),
-                    &ctx.classes,
-                ) {
-                    for decl in &rule.declarations {
-                        apply_decl(
-                            decl,
-                            &mut color,
-                            &mut bg_color,
-                            &mut border_color,
-                            &mut font_size,
-                        );
-                    }
-                }
+            if style.text_align == "left"
+                && let Some(parent_align) = &ctx.text_align
+            {
+                style.text_align = parent_align.clone();
             }
 
-            // 2. Etiketin kendi üzerindeki `style="..."` özelliğini en yüksek öncelikle uygula:
-            for decl in &ctx.inline_declarations {
-                apply_decl(
-                    decl,
-                    &mut color,
-                    &mut bg_color,
-                    &mut border_color,
-                    &mut font_size,
-                );
+            // Ebeveyn `.kart` / `<div>` zaten kart arka planını çizdiyse, içindeki düz metin
+            // satırlarının her birine tekrar tekrar çerçeve/arka plan basma!
+            if ctx.container_painted_bg && matches!(current_tag, "p" | "li" | "div" | "span") {
+                style.bg_color = None;
+                style.border_color = None;
             }
 
-            let height = font_size + 10;
-            let char_w = (font_size / 2).max(7);
+            let pad = style.padding;
+            let line_height = style.font_size + 10 + pad * 2;
+            // Cairo ve Win32 orantılı font genişliği için güvenli karakter genişliği tahmini:
+            let char_w = ((style.font_size * 64) / 100).max(8);
 
             // YAN YANA (INLINE) DİZİLİM:
             // Kısa `<a>`, `<span>`, `<button>` öğeleri satıra sığıyorsa yan yana diz!
-            let is_short_inline = matches!(current_tag, "a" | "span" | "button")
-                && text.chars().count() <= 28;
+            let is_short_inline =
+                matches!(current_tag, "a" | "span" | "button") && text.chars().count() <= 28;
 
             if is_short_inline {
-                let item_w = (text.chars().count() as u32 * char_w) + 20;
-                if *inline_x + item_w > viewport_width.saturating_sub(16) && *inline_x > 16 {
-                    // Satır doldu, bir alt satırın başına geç!
-                    *current_y += (*last_inline_height).max(height) + 10;
-                    *inline_x = 16;
+                let item_w = (text.chars().count() as u32 * char_w) + 26 + pad * 2;
+                if *inline_x + item_w > base_x + avail_width && *inline_x > base_x {
+                    *current_y += (*last_inline_height).max(line_height) + 10;
+                    *inline_x = base_x;
                 }
 
                 boxes.push(LayoutBox {
@@ -389,30 +614,36 @@ fn layout_node(
                     x: *inline_x,
                     y: *current_y,
                     width: item_w,
-                    height,
-                    color,
-                    bg_color,
-                    border_color,
-                    font_size,
+                    height: line_height,
+                    color: style.color,
+                    bg_color: style.bg_color,
+                    border_color: style.border_color,
+                    font_size: style.font_size,
+                    padding: pad,
+                    text_align: style.text_align,
                     href: ctx.href.clone(),
                     image_src: None,
                 });
 
                 *inline_x += item_w + 12;
-                *last_inline_height = (*last_inline_height).max(height);
+                *last_inline_height = (*last_inline_height).max(line_height);
                 return;
             }
 
             // Normal blok kutuya geçmeden önce açık inline satırı varsa kapat:
-            if *inline_x > 16 {
+            if *inline_x > base_x {
                 *current_y += *last_inline_height + 12;
-                *inline_x = 16;
+                *inline_x = base_x;
                 *last_inline_height = 0;
             }
 
             let is_list_item = current_tag == "li";
-            let x = if is_list_item { 32 } else { 16 };
-            let width = viewport_width.saturating_sub(x + 16);
+            let x = if is_list_item { base_x + 16 } else { base_x };
+            let width = if is_list_item {
+                avail_width.saturating_sub(16).max(60)
+            } else {
+                avail_width
+            };
 
             let formatted_text = if is_list_item {
                 format!("• {text}")
@@ -420,30 +651,76 @@ fn layout_node(
                 text.clone()
             };
 
-            let lines = wrap_text(&formatted_text, width, font_size);
+            let inner_wrap_w = width.saturating_sub(pad * 2 + 12).max(60);
+            let lines = wrap_text(&formatted_text, inner_wrap_w, style.font_size);
             let line_count = lines.len();
+
+            // Eğer çok satırlı bir paragrafın kendi bg/border'ı varsa onu da tek bir arka plan kutusunda birleştir:
+            let has_own_frame =
+                line_count > 1 && (style.bg_color.is_some() || style.border_color.is_some());
+            if has_own_frame {
+                let single_h = style.font_size + 10;
+                let total_frame_h =
+                    (line_count as u32) * (single_h + 4) + pad * 2;
+                boxes.push(LayoutBox {
+                    tag: current_tag.to_string(),
+                    text: String::new(),
+                    x,
+                    y: *current_y,
+                    width,
+                    height: total_frame_h,
+                    color: style.color.clone(),
+                    bg_color: style.bg_color.clone(),
+                    border_color: style.border_color.clone(),
+                    font_size: style.font_size,
+                    padding: pad,
+                    text_align: style.text_align.clone(),
+                    href: None,
+                    image_src: None,
+                });
+                *current_y += pad;
+            }
 
             for (idx, line) in lines.into_iter().enumerate() {
                 let y = *current_y;
+                let h = if has_own_frame {
+                    style.font_size + 10
+                } else {
+                    line_height
+                };
                 boxes.push(LayoutBox {
                     tag: current_tag.to_string(),
                     text: line,
-                    x,
+                    x: if has_own_frame { x + pad } else { x },
                     y,
-                    width,
-                    height,
-                    color: color.clone(),
-                    bg_color: bg_color.clone(),
-                    border_color: border_color.clone(),
-                    font_size,
+                    width: if has_own_frame {
+                        width.saturating_sub(pad * 2)
+                    } else {
+                        width
+                    },
+                    height: h,
+                    color: style.color.clone(),
+                    bg_color: if has_own_frame {
+                        None
+                    } else {
+                        style.bg_color.clone()
+                    },
+                    border_color: if has_own_frame {
+                        None
+                    } else {
+                        style.border_color.clone()
+                    },
+                    font_size: style.font_size,
+                    padding: if has_own_frame { 0 } else { pad },
+                    text_align: style.text_align.clone(),
                     href: ctx.href.clone(),
                     image_src: None,
                 });
 
                 if idx + 1 < line_count {
-                    *current_y += height + 4;
+                    *current_y += h + 4;
                 } else {
-                    *current_y += height + 12;
+                    *current_y += h + if has_own_frame { pad + 12 } else { 12 };
                 }
             }
         }
@@ -502,16 +779,19 @@ mod tests {
         let kurallar = parse_css(css);
         let kutular = compute_layout(&dom, &kurallar, 800);
 
-        assert_eq!(kutular.len(), 3);
+        // 2 menü linki + 1 birleşik `.kart` çerçeve kutusu + 1 içindeki `<p>` metin kutusu = 4 kutu
+        assert_eq!(kutular.len(), 4);
         // İlk iki menü linki aynı satırda (y = 16) yan yana (farklı x) durmalı!
         assert_eq!(kutular[0].y, 16);
         assert_eq!(kutular[1].y, 16);
         assert!(kutular[1].x > kutular[0].x);
 
-        // 3. kutu (.kart ve #ozel stillerini miras almış olmalı!)
+        // 3. kutu kapsayıcı `.kart` kutusu (arka plan ve çerçeve tek bir kutuda birleşik!)
         assert_eq!(kutular[2].bg_color, Some("#e0f2fe".to_string()));
         assert_eq!(kutular[2].border_color, Some("#0284c7".to_string()));
-        assert_eq!(kutular[2].color, "#0369a1");
+        // 4. kutu içindeki metin (#ozel rengini miras almış ve tekrar çerçeve çizmiyor!)
+        assert_eq!(kutular[3].color, "#0369a1");
+        assert_eq!(kutular[3].border_color, None);
     }
 
     #[test]
@@ -527,7 +807,24 @@ mod tests {
         assert_eq!(img.text, "[Gorsel: Anka Logosu]");
         assert_eq!(img.width, 320);
         assert_eq!(img.height, 120);
-        // Paragraf kutusu görselin bittiği yüksekliğin altına yerleşmeli!
         assert!(kutular[2].y >= img.y + img.height);
+    }
+
+    #[test]
+    fn test_flexbox_yanyana_sutunlar_ve_kutu_modeli() {
+        let html = "<body><div class=\"satir\"><div class=\"kutu\"><p>Sutun 1</p></div><div class=\"kutu\"><p>Sutun 2</p></div></div></body>";
+        let css = ".satir { display: flex; gap: 16px; } .kutu { background-color: #f8fafc; border: 1px solid #cbd5e1; padding: 10px; text-align: center; }";
+
+        let dom = parse_html(html);
+        let kurallar = parse_css(css);
+        let kutular = compute_layout(&dom, &kurallar, 800);
+
+        // 2 kapsayıcı kutu (Sutun 1 ve Sutun 2) aynı `y` yüksekliğinde, yan yana (`x` farklı) dizilmeli!
+        let kartlar: Vec<&LayoutBox> = kutular.iter().filter(|b| b.tag == "div").collect();
+        assert_eq!(kartlar.len(), 2);
+        assert_eq!(kartlar[0].y, kartlar[1].y);
+        assert!(kartlar[1].x > kartlar[0].x + kartlar[0].width);
+        assert_eq!(kartlar[0].padding, 10);
+        assert_eq!(kartlar[0].text_align, "center");
     }
 }

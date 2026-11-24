@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "anka-browser"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anka-css",
  "anka-html",
@@ -16,15 +16,15 @@ dependencies = [
 
 [[package]]
 name = "anka-css"
-version = "0.2.5"
+version = "0.2.6"
 
 [[package]]
 name = "anka-html"
-version = "0.2.5"
+version = "0.2.6"
 
 [[package]]
 name = "anka-layout"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anka-css",
  "anka-html",
@@ -32,18 +32,18 @@ dependencies = [
 
 [[package]]
 name = "anka-net"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anka-url",
 ]
 
 [[package]]
 name = "anka-paint"
-version = "0.2.5"
+version = "0.2.6"
 dependencies = [
  "anka-layout",
 ]
 
 [[package]]
 name = "anka-url"
-version = "0.2.5"
+version = "0.2.6"

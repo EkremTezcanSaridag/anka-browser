@@ -87,9 +87,16 @@ impl HttpResponse {
     }
 }
 
-/// Verilen `Url` adresine bağlanır (`http` veya `https`) ve sunucu `301 / 302 / 303 / 307 / 308`
+/// Verilen `Url` adresine bağlanır (`http`, `https` veya yerel `file://`) ve sunucu `301 / 302 / 303 / 307 / 308`
 /// yönlendirme yanıtı dönerse `Location:` başlığını otomatik takip eder (en fazla 5 kez).
 pub fn fetch(url: &Url) -> Result<HttpResponse, NetError> {
+    // YEREL DOSYA PROTOKOLÜ (`file:///home/.../index.html`):
+    // Python veya başka bir yerel sunucu açmadan bilgisayarınızdaki HTML, CSS ve
+    // görselleri (PNG/BMP/PPM) doğrudan diskten okur!
+    if url.scheme == "file" {
+        return fetch_local_file(url);
+    }
+
     const MAX_REDIRECTS: usize = 5;
     let mut current_url = url.clone();
 
@@ -125,6 +132,30 @@ pub fn fetch(url: &Url) -> Result<HttpResponse, NetError> {
 
     // 5 yönlendirmeyi aştıysak sonsuz döngüye girmemek için dur!
     Err(NetError::TooManyRedirects)
+}
+
+/// Yerel diskteki bir dosyayı (`file:///...`) okuyarak standart bir `HttpResponse` (200 OK)
+/// paketine çevirir. Windows sürücü yollarını (`/C:/...` -> `C:/...`) da otomatik düzeltir.
+fn fetch_local_file(url: &Url) -> Result<HttpResponse, NetError> {
+    let mut path_str = url.path.replace("%20", " ");
+    // Windows'ta `file:///C:/Users/...` -> başındaki tek `/` kaldırılır (`C:/Users/...`)
+    let bytes_path = path_str.as_bytes();
+    if bytes_path.len() >= 3
+        && bytes_path[0] == b'/'
+        && bytes_path[1].is_ascii_alphabetic()
+        && bytes_path[2] == b':'
+    {
+        path_str.remove(0);
+    }
+
+    let raw_body = std::fs::read(&path_str)?;
+    let body = String::from_utf8_lossy(&raw_body).into_owned();
+    Ok(HttpResponse {
+        status_code: 200,
+        headers: vec![("X-Anka-Transport".to_string(), "FILE".to_string())],
+        body,
+        raw_body,
+    })
 }
 
 /// Verilen `Url` adresine TCP üzerinden tek bir HTTP/1.1 GET isteği atar

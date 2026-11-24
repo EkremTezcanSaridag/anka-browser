@@ -893,10 +893,20 @@ unsafe extern "system" fn wnd_proc(
                             }
 
                             if !gorsel_cizildi && !komut.text.is_empty() {
+                                let pad = komut.padding as i32;
+                                let box_w = (box_rect.right - box_rect.left).max(1);
+                                let approx_text_w =
+                                    ((komut.text.chars().count() as u32) * (komut.font_size * 56 / 100))
+                                        as i32;
+                                let text_x = match komut.text_align.as_str() {
+                                    "center" => box_rect.left + ((box_w - approx_text_w) / 2).max(pad),
+                                    "right" => box_rect.left + (box_w - approx_text_w - pad).max(pad),
+                                    _ => draw_x + 4 + pad,
+                                };
                                 TextOutW(
                                     hdc,
-                                    draw_x + 4,
-                                    draw_y + 2,
+                                    text_x,
+                                    draw_y + 2 + pad,
                                     wide_text.as_ptr(),
                                     (wide_text.len() - 1) as i32,
                                 );
