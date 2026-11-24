@@ -7,8 +7,14 @@ use anka_net::{fetch, parse_http_response};
 use anka_paint::{PaintCommand, build_display_list};
 use anka_url::Url;
 
+#[cfg(any(windows, target_os = "linux", test))]
+mod browser_state;
+
 #[cfg(windows)]
 mod win32_gui;
+
+#[cfg(target_os = "linux")]
+mod linux_gui;
 
 /// Akıllı adres çubuğu: Kullanıcı protokol (`http://` veya `https://`) yazmayı unuttuysa
 /// otomatik olarak başına `https://` ekler.
@@ -56,7 +62,7 @@ pub fn motoru_calistir(
             ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; font-size: 16px; }",
             "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; font-size: 16px; }",
             "</style></head><body>",
-            "<h1>Anka Browser v0.2.2 — Telek Engine</h1>",
+            "<h1>Anka Browser v0.2.3 — Telek Engine</h1>",
             "<nav>",
             "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
             "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
@@ -140,7 +146,7 @@ pub fn motoru_calistir(
         "HTTP"
     };
     let durum = format!(
-        "{} {} | {} bayt indirildi | {} satir/kutu Telek Engine v0.2.2 ile cizildi",
+        "{} {} | {} bayt indirildi | {} satir/kutu Telek Engine v0.2.3 ile cizildi",
         protokol_etiketi,
         yanit.status_code,
         yanit.body.len(),
@@ -155,18 +161,27 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "http://anka.local/hosgeldiniz".to_string());
 
-    // Windows'ta doğrudan gerçek yerel masaüstü penceresini aç!
+    // Windows'ta doğrudan gerçek yerel masaüstü penceresini (Win32 GDI) aç!
     #[cfg(windows)]
     {
         win32_gui::pencereyi_baslat(&baslangic_adresi);
+        return;
     }
 
-    // Linux / macOS ortamında (ve GitHub Actions CI'da) terminal önizlemesi çalışır
+    // Linux'ta (Milis, Ubuntu, Fedora, Arch vb.) masaüstü ekranı varsa yerel GTK3 + Cairo penceresini aç!
+    #[cfg(target_os = "linux")]
+    {
+        if linux_gui::pencereyi_baslat(&baslangic_adresi) {
+            return;
+        }
+    }
+
+    // Ekransız (Headless / CI) ortamda veya diğer platformlarda terminal önizlemesi çalışır
     #[cfg(not(windows))]
     {
         let (baslik, durum, cizim_listesi) = motoru_calistir(&baslangic_adresi, 860);
         println!(
-            "Anka Browser v0.2.1 ({}) [{}] -> {}",
+            "Anka Browser v0.2.3 ({}) [{}] -> {}",
             baslangic_adresi,
             baslik.unwrap_or_else(|| "Adsız".to_string()),
             durum
