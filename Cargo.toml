@@ -14,7 +14,7 @@ members = [
 
 #tüm alt modüllerin bilgilerini içeren kısım 
 [workspace.package]
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 license = "MPL-2.0"
 repository = "https://github.com/EkremTezcanSaridag/anka-browser"

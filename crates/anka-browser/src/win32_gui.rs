@@ -64,8 +64,14 @@ const ID_BTN_EXAMPLE: usize = 105;
 const ID_BTN_BACK: usize = 106;
 const ID_BTN_FORWARD: usize = 107;
 const ID_BTN_RELOAD: usize = 108;
+const ID_BTN_NEW_TAB: usize = 109;
+const ID_BTN_CLOSE_TAB: usize = 110;
+const ID_BTN_BOOKMARK_TOGGLE: usize = 111;
+const ID_BTN_BOOKMARKS_PAGE: usize = 112;
+const ID_BTN_TAB_BASE: usize = 200;
+const MAX_TAB_SLOTS: usize = 5;
 
-const TOOLBAR_HEIGHT: i32 = 48;
+const TOOLBAR_HEIGHT: i32 = 84;
 const STATUS_HEIGHT: i32 = 28;
 
 #[repr(C)]
@@ -186,6 +192,8 @@ unsafe extern "system" {
 }
 
 struct PencereDurumu {
+    tab_buttons: [usize; MAX_TAB_SLOTS],
+    btn_bookmark_toggle: usize,
     url_edit: usize,
     btn_go: usize,
     state: BrowserState,
@@ -203,11 +211,33 @@ fn rgb(r: u8, g: u8, b: u8) -> u32 {
 
 fn pencereyi_yenile(hwnd: HWND, st: &PencereDurumu) {
     let url_edit = st.url_edit as HWND;
-    let wide_url = to_wide(&st.state.current_url);
+    let wide_url = to_wide(st.state.current_url());
     let wide_title = to_wide(&st.state.window_title());
+    let bm_label = if st.state.is_current_bookmarked() {
+        "* Kayitli"
+    } else {
+        "* Yer Imi"
+    };
+    let wide_bm = to_wide(bm_label);
+
     unsafe {
         SetWindowTextW(url_edit, wide_url.as_ptr());
         SetWindowTextW(hwnd, wide_title.as_ptr());
+        if st.btn_bookmark_toggle != 0 {
+            SetWindowTextW(st.btn_bookmark_toggle as HWND, wide_bm.as_ptr());
+        }
+        for (idx, &btn_ptr) in st.tab_buttons.iter().enumerate() {
+            if btn_ptr != 0 {
+                let btn_hwnd = btn_ptr as HWND;
+                if idx < st.state.tabs.len() {
+                    let lbl = to_wide(&st.state.tab_label(idx));
+                    SetWindowTextW(btn_hwnd, lbl.as_ptr());
+                    ShowWindow(btn_hwnd, 5); // SW_SHOW
+                } else {
+                    ShowWindow(btn_hwnd, 0); // SW_HIDE
+                }
+            }
+        }
         InvalidateRect(hwnd, null(), 1);
     }
 }
@@ -260,14 +290,83 @@ unsafe extern "system" fn wnd_proc(
                     to_wide("Segoe UI").as_ptr(),
                 );
 
-                // Gezinme Butonları: <- Geri, -> İleri, Yenile, Ana Sayfa, CERN, HTTPS Example
+                // 1. SATIR: Çoklu Sekme ve Yer İmleri Çubuğu (Y = 8)
+                let mut tab_buttons = [0usize; MAX_TAB_SLOTS];
+                for (idx, slot) in tab_buttons.iter_mut().enumerate() {
+                    let tab_btn = CreateWindowExW(
+                        0,
+                        to_wide("BUTTON").as_ptr(),
+                        to_wide(&format!("Sekme {}", idx + 1)).as_ptr(),
+                        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                        8 + (idx as i32 * 136),
+                        8,
+                        132,
+                        26,
+                        hwnd,
+                        (ID_BTN_TAB_BASE + idx) as HMENU,
+                        hinst,
+                        null_mut(),
+                    );
+                    SendMessageW(tab_btn, WM_SETFONT, ui_font as WPARAM, 1);
+                    *slot = tab_btn as usize;
+                }
+
+                let btn_new_tab = CreateWindowExW(
+                    0,
+                    to_wide("BUTTON").as_ptr(),
+                    to_wide("+ Sekme").as_ptr(),
+                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    692,
+                    8,
+                    72,
+                    26,
+                    hwnd,
+                    ID_BTN_NEW_TAB as HMENU,
+                    hinst,
+                    null_mut(),
+                );
+                SendMessageW(btn_new_tab, WM_SETFONT, ui_font as WPARAM, 1);
+
+                let btn_close_tab = CreateWindowExW(
+                    0,
+                    to_wide("BUTTON").as_ptr(),
+                    to_wide("x Kapat").as_ptr(),
+                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    768,
+                    8,
+                    68,
+                    26,
+                    hwnd,
+                    ID_BTN_CLOSE_TAB as HMENU,
+                    hinst,
+                    null_mut(),
+                );
+                SendMessageW(btn_close_tab, WM_SETFONT, ui_font as WPARAM, 1);
+
+                let btn_bookmarks_page = CreateWindowExW(
+                    0,
+                    to_wide("BUTTON").as_ptr(),
+                    to_wide("Yer Imlerim").as_ptr(),
+                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    840,
+                    8,
+                    92,
+                    26,
+                    hwnd,
+                    ID_BTN_BOOKMARKS_PAGE as HMENU,
+                    hinst,
+                    null_mut(),
+                );
+                SendMessageW(btn_bookmarks_page, WM_SETFONT, ui_font as WPARAM, 1);
+
+                // 2. SATIR: Gezinme Butonları (Y = 42): <- Geri, -> İleri, Yenile, Ana Sayfa, CERN, HTTPS Example
                 let btn_back = CreateWindowExW(
                     0,
                     to_wide("BUTTON").as_ptr(),
                     to_wide("<-").as_ptr(),
                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                     8,
-                    10,
+                    42,
                     32,
                     28,
                     hwnd,
@@ -283,7 +382,7 @@ unsafe extern "system" fn wnd_proc(
                     to_wide("->").as_ptr(),
                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                     44,
-                    10,
+                    42,
                     32,
                     28,
                     hwnd,
@@ -299,7 +398,7 @@ unsafe extern "system" fn wnd_proc(
                     to_wide("Yenile").as_ptr(),
                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                     80,
-                    10,
+                    42,
                     54,
                     28,
                     hwnd,
@@ -315,7 +414,7 @@ unsafe extern "system" fn wnd_proc(
                     to_wide("Ana Sayfa").as_ptr(),
                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                     138,
-                    10,
+                    42,
                     76,
                     28,
                     hwnd,
@@ -331,7 +430,7 @@ unsafe extern "system" fn wnd_proc(
                     to_wide("CERN").as_ptr(),
                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                     218,
-                    10,
+                    42,
                     54,
                     28,
                     hwnd,
@@ -347,7 +446,7 @@ unsafe extern "system" fn wnd_proc(
                     to_wide("HTTPS Example").as_ptr(),
                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                     276,
-                    10,
+                    42,
                     106,
                     28,
                     hwnd,
@@ -364,8 +463,8 @@ unsafe extern "system" fn wnd_proc(
                     to_wide("http://anka.local/hosgeldiniz").as_ptr(),
                     WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
                     388,
-                    10,
-                    430,
+                    42,
+                    380,
                     28,
                     hwnd,
                     ID_URL_EDIT as HMENU,
@@ -380,9 +479,9 @@ unsafe extern "system" fn wnd_proc(
                     to_wide("BUTTON").as_ptr(),
                     to_wide("Git ->").as_ptr(),
                     WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                    820,
-                    10,
-                    70,
+                    774,
+                    42,
+                    68,
                     28,
                     hwnd,
                     ID_BTN_GO as HMENU,
@@ -391,11 +490,31 @@ unsafe extern "system" fn wnd_proc(
                 );
                 SendMessageW(btn_go, WM_SETFONT, ui_font as WPARAM, 1);
 
+                // Yer İmi Ekle/Çıkar Butonu
+                let btn_bookmark_toggle = CreateWindowExW(
+                    0,
+                    to_wide("BUTTON").as_ptr(),
+                    to_wide("* Yer Imi").as_ptr(),
+                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    846,
+                    42,
+                    86,
+                    28,
+                    hwnd,
+                    ID_BTN_BOOKMARK_TOGGLE as HMENU,
+                    hinst,
+                    null_mut(),
+                );
+                SendMessageW(btn_bookmark_toggle, WM_SETFONT, ui_font as WPARAM, 1);
+
                 if let Ok(mut guard) = DURUM.lock()
                     && let Some(st) = guard.as_mut()
                 {
+                    st.tab_buttons = tab_buttons;
+                    st.btn_bookmark_toggle = btn_bookmark_toggle as usize;
                     st.url_edit = url_edit as usize;
                     st.btn_go = btn_go as usize;
+                    pencereyi_yenile(hwnd, st);
                 }
             }
             0
@@ -415,9 +534,17 @@ unsafe extern "system" fn wnd_proc(
                 if let Ok(guard) = DURUM.lock()
                     && let Some(st) = guard.as_ref()
                 {
-                    let edit_w = (width - 388 - 88).max(120);
-                    MoveWindow(st.url_edit as HWND, 388, 10, edit_w, 28, 1);
-                    MoveWindow(st.btn_go as HWND, 388 + edit_w + 8, 10, 72, 28, 1);
+                    let edit_w = (width - 388 - 178).max(120);
+                    MoveWindow(st.url_edit as HWND, 388, 42, edit_w, 28, 1);
+                    MoveWindow(st.btn_go as HWND, 388 + edit_w + 6, 42, 68, 28, 1);
+                    MoveWindow(
+                        st.btn_bookmark_toggle as HWND,
+                        388 + edit_w + 80,
+                        42,
+                        86,
+                        28,
+                        1,
+                    );
                 }
                 InvalidateRect(hwnd, null(), 1);
             }
@@ -474,6 +601,43 @@ unsafe extern "system" fn wnd_proc(
                 ID_BTN_HOME => sayfayi_yukle_ve_yenile(hwnd, "http://anka.local/hosgeldiniz", true),
                 ID_BTN_CERN => sayfayi_yukle_ve_yenile(hwnd, "http://info.cern.ch", true),
                 ID_BTN_EXAMPLE => sayfayi_yukle_ve_yenile(hwnd, "https://example.com", true),
+                ID_BTN_BOOKMARKS_PAGE => {
+                    sayfayi_yukle_ve_yenile(hwnd, "http://anka.local/yer-imleri", true)
+                }
+                ID_BTN_NEW_TAB => {
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                        && st.state.tabs.len() < MAX_TAB_SLOTS
+                    {
+                        st.state.new_tab("http://anka.local/hosgeldiniz");
+                        pencereyi_yenile(hwnd, st);
+                    }
+                }
+                ID_BTN_CLOSE_TAB => {
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                    {
+                        st.state.close_active_tab();
+                        pencereyi_yenile(hwnd, st);
+                    }
+                }
+                ID_BTN_BOOKMARK_TOGGLE => {
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                    {
+                        st.state.toggle_bookmark();
+                        pencereyi_yenile(hwnd, st);
+                    }
+                }
+                id if (ID_BTN_TAB_BASE..ID_BTN_TAB_BASE + MAX_TAB_SLOTS).contains(&id) => {
+                    let tab_idx = id - ID_BTN_TAB_BASE;
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                        && st.state.switch_tab(tab_idx)
+                    {
+                        pencereyi_yenile(hwnd, st);
+                    }
+                }
                 _ => {}
             }
             0
@@ -583,8 +747,9 @@ unsafe extern "system" fn wnd_proc(
                     && let Some(st) = guard.as_ref()
                 {
                     let face = to_wide("Segoe UI");
+                    let scroll_y = st.state.scroll_y();
 
-                    for komut in &st.state.display_list {
+                    for komut in st.state.display_list() {
                         let weight = if matches!(komut.tag.as_str(), "h1" | "h2" | "h3") {
                             FW_BOLD
                         } else {
@@ -614,7 +779,7 @@ unsafe extern "system" fn wnd_proc(
 
                         let wide_text = to_wide(&komut.text);
                         let draw_x = komut.x as i32 + 8;
-                        let draw_y = TOOLBAR_HEIGHT + komut.y as i32 - st.state.scroll_y;
+                        let draw_y = TOOLBAR_HEIGHT + komut.y as i32 - scroll_y;
 
                         if draw_y >= TOOLBAR_HEIGHT && draw_y < client.bottom - STATUS_HEIGHT - 12 {
                             let box_rect = RECT {
@@ -673,7 +838,7 @@ unsafe extern "system" fn wnd_proc(
                     );
                     let old_font = SelectObject(hdc, status_font as HGDIOBJ);
                     SetTextColor(hdc, rgb(51, 65, 85));
-                    let wide_status = to_wide(&st.state.status_message);
+                    let wide_status = to_wide(&st.state.status_message());
                     TextOutW(
                         hdc,
                         12,
@@ -702,11 +867,13 @@ unsafe extern "system" fn wnd_proc(
 }
 
 pub fn pencereyi_baslat(baslangic_adresi: &str) {
-    let state = BrowserState::new(baslangic_adresi, 880);
+    let state = BrowserState::new(baslangic_adresi, 940);
     let title_str = state.window_title();
 
     if let Ok(mut guard) = DURUM.lock() {
         *guard = Some(PencereDurumu {
+            tab_buttons: [0usize; MAX_TAB_SLOTS],
+            btn_bookmark_toggle: 0,
             url_edit: 0,
             btn_go: 0,
             state,
