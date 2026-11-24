@@ -10,6 +10,9 @@ use anka_url::Url;
 #[cfg(windows)]
 mod winhttp_tls;
 
+#[cfg(not(windows))]
+mod linux_tls;
+
 /// Tarayıcımız internete bağlanırken veya veri indirirken
 /// karşılaşabileceği tüm olası hata durumlarının listesi:
 #[derive(Debug)]
@@ -89,20 +92,19 @@ pub fn fetch(url: &Url) -> Result<HttpResponse, NetError> {
     let mut current_url = url.clone();
 
     for _ in 0..=MAX_REDIRECTS {
-        // HTTPS protokolü ise Windows'un yerel TLS 1.3 motorunu kullan
-        if current_url.scheme == "https" {
+        // Protokole göre tek bir HTTP/1.1 veya HTTPS/TLS 1.3 isteği at:
+        let response = if current_url.scheme == "https" {
             #[cfg(windows)]
             {
                 return winhttp_tls::fetch_https(&current_url);
             }
             #[cfg(not(windows))]
             {
-                return Err(NetError::UnsupportedScheme(current_url.scheme.clone()));
+                linux_tls::fetch_https_once(&current_url)?
             }
-        }
-
-        // Tek bir HTTP/1.1 isteği at
-        let response = fetch_once(&current_url)?;
+        } else {
+            fetch_once(&current_url)?
+        };
 
         // Sunucu "Bu sayfa taşındı (301/302/307/308)" dediyse ve zarfta "Location" varsa:
         let is_redirect = matches!(response.status_code, 301 | 302 | 303 | 307 | 308);

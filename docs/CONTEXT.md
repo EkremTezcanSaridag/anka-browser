@@ -9,7 +9,7 @@ Bu doküman, geliştirme ortamı **Windows'tan Milis Linux'a** taşınırken Ant
 - **Motor Adı:** Telek Engine (*Anka kuşunun uçmasını sağlayan ana kanat tüyü*)
 - **GitHub Deposu:** `https://github.com/EkremTezcanSaridag/anka-browser`
 - **Dil & Yapı:** Rust (`edition = "2024"`, Cargo Workspace / Monorepo, Lisans: `MPL-2.0`)
-- **Mevcut Son Sürüm:** `v0.2.2` (21/21 birim testi başarılı, sıfır `clippy` uyarısı, sıfır üçüncü parti crate bağımlılığı)
+- **Mevcut Son Sürüm:** `v0.2.3` (23/23 birim testi başarılı, sıfır `clippy` uyarısı, sıfır üçüncü parti crate bağımlılığı)
 - **Temel Felsefe:** Hazır bir Chromium/WebKit/Gecko fork'u veya WebView kabuğu **değildir**. URL ayrıştırmadan ağ katmanına, HTML/DOM ağacından CSS, Layout ve Paint aşamasına kadar tüm boru hattı (pipeline) sıfırdan, eğitici ve anlaşılır Türkçe yorum satırlarıyla yazılmaktadır.
 
 ---
@@ -32,12 +32,12 @@ Bu doküman, geliştirme ortamı **Windows'tan Milis Linux'a** taşınırken Ant
 | Modül | Mevcut Yetenekler (`v0.2.2` İtibarıyla) | Test Sayısı |
 | :--- | :--- | :---: |
 | **`crates/anka-url`** | `Url::parse` (scheme, host, port, path, query, fragment), `effective_port` (`http -> 80`, `https -> 443`), `Url::resolve` (bağıl URL çözümleme). | 4 ✅ |
-| **`crates/anka-net`** | `HTTP/1.1` TCP istemcisi (`fetch`), `301/302/303/307/308` otomatik yönlendirme takibi (`MAX_REDIRECTS = 5`), `Transfer-Encoding: chunked` birleştirici (`decode_chunked`), büyük/küçük harf duyarsız `get_header`. Windows'ta `winhttp_tls.rs` ile `HTTPS/TLS 1.3`. | 4 ✅ |
+| **`crates/anka-net`** | `HTTP/1.1` TCP istemcisi (`fetch`), `301/302/303/307/308` otomatik yönlendirme takibi (`MAX_REDIRECTS = 5`), `Transfer-Encoding: chunked` birleştirici (`decode_chunked`), büyük/küçük harf duyarsız `get_header`. Windows'ta `winhttp_tls.rs`, tüm Linux dağıtımlarında `linux_tls.rs` (OpenSSL FFI) ile sıfır bağımlılıklı `HTTPS/TLS 1.3`. | 4 ✅ |
 | **`crates/anka-html`** | Hata toleranslı (kapanmamış etiketlerde çökmeyen) HTML5 Tokenizer ve DOM ağacı (`DomNode`), etiket özellikleri (`attributes`), `extract_title` (`<title>`), `extract_styles` (`<style>`), `extract_stylesheet_links` (`<link rel="stylesheet">`), `decode_html_entities` (`&amp;`, `&nbsp;` vb.). | 6 ✅ |
 | **`crates/anka-css`** | `parse_css`: Seçici (`selector`) ve özellik (`Declaration`: `property`, `value`) ayrıştırıcı. | 2 ✅ |
 | **`crates/anka-layout`** | `compute_layout`: DOM + CSS birleştirme, `selector_matches` (`tag`, `.class`, `#id`, `tag.class`), satır içi `style="..."`, otomatik satır kaydırma (`wrap_text`), `<li>` madde işareti (`• `), `<hr>` yatay çizgi, kısa `<a>`/`<span>`/`<button>` öğelerinin yan yana (`inline`) dizilimi, `bg_color` ve `border_color`. | 3 ✅ |
 | **`crates/anka-paint`** | `build_display_list`: İngilizce renk adlarını ve 6/3 haneli Hex renk kodlarını (`#ff5733`, `#0f0`) `RgbColor` piksellerine ve `PaintCommand` listesine dönüştürme. | 2 ✅ |
-| **`crates/anka-browser`** | `motoru_calistir`, akıllı adres çubuğu (`normalize_address`), Windows için sıfır bağımlılıklı yerel Win32 GDI masaüstü penceresi (`win32_gui.rs`) ve Linux/CI için terminal önizlemesi (`main.rs`). | — |
+| **`crates/anka-browser`** | `motoru_calistir`, akıllı adres çubuğu (`normalize_address`), işletim sisteminden bağımsız ortak tarayıcı durumu (`browser_state.rs`), Windows için Win32 GDI masaüstü penceresi (`win32_gui.rs`), Linux (Wayland/X11) için GTK3 + Cairo 2D masaüstü penceresi (`linux_gui.rs`) ve CI için terminal önizlemesi (`main.rs`). | 2 ✅ |
 
 ---
 

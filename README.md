@@ -84,9 +84,9 @@ Anka'nın çekirdek motoru bir web sayfasını aşağıdaki boru hattı (pipelin
   - [x] Block & Inline kutu modeli yerleşimi ve CSS stil eşleştirme (`crates/anka-layout`)
   - [x] RGB çizim komutları listesi (`crates/anka-paint`) ve 6 modülü birleştiren ana uygulama (`crates/anka-browser`)
 - [ ] **Faz 4 — Tarayıcı Arayüzü ve Etkileşim**
-  - [x] Sıfır bağımlılıklı yerel masaüstü grafik penceresi (Win32 GDI GUI), adres çubuğu ve durum çubuğu (`crates/anka-browser`)
-  - [ ] Tıklanabilir bağlantılar (`<a href>`), ileri/geri geçmişi, kaydırma (scroll) ve çoklu sekme
-  - [ ] Görsel (`<img>`) desteği ve Flexbox yerleşimi
+  - [x] Sıfır bağımlılıklı yerel masaüstü grafik penceresi (Windows Win32 GDI & Linux GTK3/Cairo 2D GUI), adres çubuğu ve durum çubuğu (`crates/anka-browser`)
+  - [x] Tıklanabilir bağlantılar (`<a href>`), ileri/geri geçmişi (`<-` / `->`) ve fare tekerleği ile kaydırma (scroll)
+  - [ ] Çoklu sekme (Multi-tab), yer imleri, görsel (`<img>`) desteği ve Flexbox yerleşimi
 - [ ] **Faz 5 — JavaScript, Süreç İzolasyonu ve Güvenlik**
   - [ ] JavaScript motoru ve DOM API entegrasyonu
   - [ ] Çok süreçli (Multi-process) sekme izolasyonu ve yerleşik izleyici/reklam engelleyici
