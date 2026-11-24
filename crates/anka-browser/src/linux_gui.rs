@@ -1,7 +1,6 @@
 // Anka Browser - Sıfır Bağımlılıklı Yerel Linux Masaüstü Penceresi (GTK3 + Cairo 2D)
 // Tüm Linux dağıtımlarında (Milis, Ubuntu, Debian, Fedora, Arch, Pardus) hem Wayland hem X11
-// üzerinde çalışır. Hiçbir harici crate kullanmadan doğrudan sistemdeki `libgtk-3.so`,
-// `libgdk-3.so`, `libgobject-2.0.so` ve `libcairo.so` kütüphanelerini kullanır.
+// üzerinde çalışır. Çoklu Sekme (Multi-Tab) ve Yer İmleri (Bookmarks) çubuğunu destekler.
 
 #![cfg(target_os = "linux")]
 
@@ -16,6 +15,7 @@ type GtkWidget = c_void;
 type GtkWindow = c_void;
 type GtkContainer = c_void;
 type GtkBox = c_void;
+type GtkButton = c_void;
 type GtkEntry = c_void;
 type GtkLabel = c_void;
 type GdkEvent = c_void;
@@ -41,6 +41,9 @@ const CAIRO_FONT_SLANT_NORMAL: c_int = 0;
 const CAIRO_FONT_WEIGHT_NORMAL: c_int = 0;
 const CAIRO_FONT_WEIGHT_BOLD: c_int = 1;
 
+// Sekme çubuğunda aynı anda gösterilecek maksimum hızlı sekme butonu sayısı:
+const MAX_TAB_SLOTS: usize = 5;
+
 #[link(name = "gtk-3")]
 unsafe extern "C" {
     fn gtk_init_check(argc: *mut c_int, argv: *mut *mut *mut c_char) -> c_int;
@@ -64,6 +67,7 @@ unsafe extern "C" {
     fn gtk_container_set_border_width(container: *mut GtkContainer, border_width: u32);
 
     fn gtk_button_new_with_label(label: *const c_char) -> *mut GtkWidget;
+    fn gtk_button_set_label(button: *mut GtkButton, label: *const c_char);
     fn gtk_entry_new() -> *mut GtkWidget;
     fn gtk_entry_set_text(entry: *mut GtkEntry, text: *const c_char);
     fn gtk_entry_get_text(entry: *mut GtkEntry) -> *const c_char;
@@ -77,12 +81,18 @@ unsafe extern "C" {
     fn gtk_widget_queue_draw(widget: *mut GtkWidget);
     fn gtk_widget_get_allocated_width(widget: *mut GtkWidget) -> c_int;
     fn gtk_widget_get_allocated_height(widget: *mut GtkWidget) -> c_int;
+    fn gtk_widget_show(widget: *mut GtkWidget);
+    fn gtk_widget_hide(widget: *mut GtkWidget);
     fn gtk_widget_show_all(widget: *mut GtkWidget);
 }
 
 #[link(name = "gdk-3")]
 unsafe extern "C" {
-    fn gdk_event_get_coords(event: *const GdkEvent, x_win: *mut c_double, y_win: *mut c_double) -> c_int;
+    fn gdk_event_get_coords(
+        event: *const GdkEvent,
+        x_win: *mut c_double,
+        y_win: *mut c_double,
+    ) -> c_int;
     fn gdk_event_get_scroll_direction(event: *const GdkEvent, direction: *mut c_int) -> c_int;
     fn gdk_event_get_scroll_deltas(
         event: *const GdkEvent,
@@ -130,6 +140,8 @@ unsafe extern "C" {
 /// Linux penceresinin arayüz bileşenlerini ve ortak `BrowserState` durumunu tutan yapı:
 struct LinuxGuiApp {
     window: usize,
+    tab_buttons: [usize; MAX_TAB_SLOTS],
+    btn_bookmark_toggle: usize,
     url_entry: usize,
     canvas: usize,
     status_label: usize,
@@ -144,23 +156,62 @@ fn to_cstr(s: &str) -> CString {
 }
 
 /// GTK sinyalini (örn: `"clicked"`, `"activate"`, `"draw"`) bir Rust fonksiyonuna bağlar.
-unsafe fn connect_signal(instance: *mut GtkWidget, signal_name: &str, callback: GCallback) {
+unsafe fn connect_signal_with_data(
+    instance: *mut GtkWidget,
+    signal_name: &str,
+    callback: GCallback,
+    user_data: usize,
+) {
     let c_sig = to_cstr(signal_name);
     unsafe {
-        g_signal_connect_data(instance, c_sig.as_ptr(), callback, null_mut(), null(), 0);
+        g_signal_connect_data(
+            instance,
+            c_sig.as_ptr(),
+            callback,
+            user_data as *mut c_void,
+            null(),
+            0,
+        );
     }
 }
 
-/// Pencere başlığını, adres çubuğunu, durum çubuğunu günceller ve tuvali yeniden çizdirir.
+unsafe fn connect_signal(instance: *mut GtkWidget, signal_name: &str, callback: GCallback) {
+    unsafe {
+        connect_signal_with_data(instance, signal_name, callback, 0);
+    }
+}
+
+/// Pencere başlığını, sekme çubuğu butonlarını, adres çubuğunu, yer imi yıldızını,
+/// durum çubuğunu günceller ve tuvali yeniden çizdirir.
 fn arayuzu_guncelle(app: &LinuxGuiApp) {
     let title_c = to_cstr(&app.state.window_title());
-    let url_c = to_cstr(&app.state.current_url);
-    let status_c = to_cstr(&app.state.status_message);
+    let url_c = to_cstr(app.state.current_url());
+    let status_c = to_cstr(&app.state.status_message());
+    let bm_label = if app.state.is_current_bookmarked() {
+        "★ Kayitli"
+    } else {
+        "☆ Yer Imi"
+    };
+    let bm_c = to_cstr(bm_label);
 
     unsafe {
         gtk_window_set_title(app.window as *mut GtkWindow, title_c.as_ptr());
         gtk_entry_set_text(app.url_entry as *mut GtkEntry, url_c.as_ptr());
         gtk_label_set_text(app.status_label as *mut GtkLabel, status_c.as_ptr());
+        gtk_button_set_label(app.btn_bookmark_toggle as *mut GtkButton, bm_c.as_ptr());
+
+        // Açık sekmelerin butonlarını güncelle ve göster, kapalı slotları gizle:
+        for (idx, &btn_ptr) in app.tab_buttons.iter().enumerate() {
+            let btn = btn_ptr as *mut GtkWidget;
+            if idx < app.state.tabs.len() {
+                let lbl_c = to_cstr(&app.state.tab_label(idx));
+                gtk_button_set_label(btn as *mut GtkButton, lbl_c.as_ptr());
+                gtk_widget_show(btn);
+            } else {
+                gtk_widget_hide(btn);
+            }
+        }
+
         gtk_widget_queue_draw(app.canvas as *mut GtkWidget);
     }
 }
@@ -188,6 +239,53 @@ unsafe extern "C" fn on_window_destroy(_widget: *mut GtkWidget, _data: *mut c_vo
     unsafe {
         gtk_main_quit();
     }
+}
+
+/// Sekme butonlarından birine (`Sekme 1..5`) tıklandığında o sekmeye geçiş yapar.
+unsafe extern "C" fn on_tab_clicked(_widget: *mut GtkWidget, data: *mut c_void) {
+    let tab_index = data as usize;
+    if let Ok(mut guard) = LINUX_APP.lock()
+        && let Some(app) = guard.as_mut()
+        && app.state.switch_tab(tab_index)
+    {
+        arayuzu_guncelle(app);
+    }
+}
+
+/// `+ Sekme` butonuna basıldığında yeni bir sekme açar.
+unsafe extern "C" fn on_new_tab_clicked(_widget: *mut GtkWidget, _data: *mut c_void) {
+    if let Ok(mut guard) = LINUX_APP.lock()
+        && let Some(app) = guard.as_mut()
+        && app.state.tabs.len() < MAX_TAB_SLOTS
+    {
+        app.state.new_tab("http://anka.local/hosgeldiniz");
+        arayuzu_guncelle(app);
+    }
+}
+
+/// `x Kapat` butonuna basıldığında aktif sekmeyi kapatır.
+unsafe extern "C" fn on_close_tab_clicked(_widget: *mut GtkWidget, _data: *mut c_void) {
+    if let Ok(mut guard) = LINUX_APP.lock()
+        && let Some(app) = guard.as_mut()
+    {
+        app.state.close_active_tab();
+        arayuzu_guncelle(app);
+    }
+}
+
+/// `☆ Yer Imi` / `★ Kayitli` butonuna basıldığında aktif sayfayı yer imlerine ekler/çıkarır.
+unsafe extern "C" fn on_bookmark_toggle_clicked(_widget: *mut GtkWidget, _data: *mut c_void) {
+    if let Ok(mut guard) = LINUX_APP.lock()
+        && let Some(app) = guard.as_mut()
+    {
+        app.state.toggle_bookmark();
+        arayuzu_guncelle(app);
+    }
+}
+
+/// `Yer Imlerim` butonuna basıldığında `http://anka.local/yer-imleri` sayfasını açar.
+unsafe extern "C" fn on_bookmarks_page_clicked(_widget: *mut GtkWidget, _data: *mut c_void) {
+    adres_yukle("http://anka.local/yer-imleri", true);
 }
 
 /// `Git ->` butonuna basıldığında veya adres çubuğunda `Enter` tuşuna basıldığında çalışır.
@@ -324,7 +422,7 @@ unsafe extern "C" fn on_canvas_scroll(
 }
 
 /// CAIRO 2D ÇİZİM MOTORU (`draw` sinyali):
-/// `anka-paint` modülümüzden gelen `PaintCommand` listesini Linux penceresinin tuvaline çizer!
+/// Aktif sekmenin `PaintCommand` listesini Linux penceresinin tuvaline çizer!
 unsafe extern "C" fn on_canvas_draw(
     widget: *mut GtkWidget,
     cr: *mut CairoT,
@@ -344,18 +442,18 @@ unsafe extern "C" fn on_canvas_draw(
         if let Ok(guard) = LINUX_APP.lock()
             && let Some(app) = guard.as_ref()
         {
-            for komut in &app.state.display_list {
+            let scroll_y = app.state.scroll_y();
+            for komut in app.state.display_list() {
                 let draw_x = (komut.x as c_double) + 8.0;
-                let draw_y = (komut.y as i32 - app.state.scroll_y) as c_double;
+                let draw_y = (komut.y as i32 - scroll_y) as c_double;
                 let box_w = (komut.width as c_double).min((width - 24.0).max(100.0));
                 let box_h = komut.height as c_double;
 
-                // Ekranın görünür alanında değilse çizimi atla (Performans optimizasyonu)
                 if draw_y + box_h < 0.0 || draw_y > height {
                     continue;
                 }
 
-                // 2. Eğer kutunun CSS arka plan rengi (`background-color`) varsa boya
+                // 2. Kutu arka plan rengi (`background-color`)
                 if let Some(bg) = &komut.bg_color {
                     cairo_set_source_rgb(
                         cr,
@@ -367,7 +465,7 @@ unsafe extern "C" fn on_canvas_draw(
                     cairo_fill(cr);
                 }
 
-                // 3. Eğer kutunun CSS çerçevesi (`border`) varsa etrafına 1px çerçeve çiz
+                // 3. Kutu çerçevesi (`border`)
                 if let Some(border) = &komut.border_color {
                     cairo_set_source_rgb(
                         cr,
@@ -380,7 +478,7 @@ unsafe extern "C" fn on_canvas_draw(
                     cairo_stroke(cr);
                 }
 
-                // 4. Metni (veya link alt çizgisini) çiz
+                // 4. Metin ve link alt çizgisi
                 if !komut.text.is_empty() {
                     let weight = if matches!(komut.tag.as_str(), "h1" | "h2" | "h3") {
                         CAIRO_FONT_WEIGHT_BOLD
@@ -403,14 +501,12 @@ unsafe extern "C" fn on_canvas_draw(
                         komut.color.b as c_double / 255.0,
                     );
 
-                    // Cairo'da metinler taban çizgisinden (baseline) çizildiği için font_size kadar aşağı kaydırıyoruz
                     let baseline_y = draw_y + (komut.font_size as c_double);
                     cairo_move_to(cr, draw_x + 4.0, baseline_y);
 
                     let c_text = to_cstr(&komut.text);
                     cairo_show_text(cr, c_text.as_ptr());
 
-                    // Eğer `<a>` link etiketi ise altına ince bir çizgi (underline) çek
                     if komut.tag == "a" {
                         cairo_set_line_width(cr, 1.0);
                         let line_w = ((komut.text.chars().count() as u32)
@@ -427,33 +523,60 @@ unsafe extern "C" fn on_canvas_draw(
 }
 
 /// Linux masaüstü ortamında (Wayland veya X11) GTK3 penceresini başlatmayı dener.
-/// Eğer masaüstü ekranı varsa pencereyi açıp `true` döner;
-/// eğer sunucu/CI (ekransız terminal) ortamındaysa `false` döner (böylece terminal önizlemesi çalışır).
 pub fn pencereyi_baslat(baslangic_adresi: &str) -> bool {
     unsafe {
         let mut argc: c_int = 0;
         let mut argv: *mut *mut c_char = null_mut();
-        // `gtk_init_check`: Grafik ekran (Wayland/X11) yoksa çökmez, 0 (false) döndürür!
         if gtk_init_check(&mut argc, &mut argv) == 0 {
             return false;
         }
 
-        let state = BrowserState::new(baslangic_adresi, 920);
+        let state = BrowserState::new(baslangic_adresi, 960);
 
-        // 1. Ana Pencereyi Oluştur
+        // 1. Ana Pencere
         let window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
         let title_c = to_cstr(&state.window_title());
         gtk_window_set_title(window as *mut GtkWindow, title_c.as_ptr());
-        gtk_window_set_default_size(window as *mut GtkWindow, 960, 680);
+        gtk_window_set_default_size(window as *mut GtkWindow, 1020, 720);
         connect_signal(window, "destroy", on_window_destroy as GCallback);
 
-        // 2. Dikey Ana Kutu (Üstte Araç Çubuğu, Ortada Web Tuvali, Altta Durum Çubuğu)
+        // 2. Dikey Ana Kutu
         let vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
         gtk_container_add(window as *mut GtkContainer, vbox);
 
-        // 3. Üst Araç Çubuğu (Yatay Kutu)
+        // 3. ÜST SEKME ÇUBUĞU (Tab Bar: [Sekme 1] [Sekme 2] ... [+ Sekme] [x Kapat] [Yer İmlerim])
+        let tab_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+        gtk_container_set_border_width(tab_bar as *mut GtkContainer, 4);
+        gtk_box_pack_start(vbox as *mut GtkBox, tab_bar, 0, 1, 0);
+
+        let mut tab_buttons = [0usize; MAX_TAB_SLOTS];
+        for (idx, slot) in tab_buttons.iter_mut().enumerate() {
+            let lbl = to_cstr(&state.tab_label(idx));
+            let btn = gtk_button_new_with_label(lbl.as_ptr());
+            gtk_box_pack_start(tab_bar as *mut GtkBox, btn, 0, 0, 0);
+            connect_signal_with_data(btn, "clicked", on_tab_clicked as GCallback, idx);
+            *slot = btn as usize;
+        }
+
+        let btn_new_tab = gtk_button_new_with_label(to_cstr("+ Sekme").as_ptr());
+        let btn_close_tab = gtk_button_new_with_label(to_cstr("x Kapat").as_ptr());
+        let btn_bookmarks_page = gtk_button_new_with_label(to_cstr("Yer Imlerim").as_ptr());
+
+        gtk_box_pack_start(tab_bar as *mut GtkBox, btn_new_tab, 0, 0, 0);
+        gtk_box_pack_start(tab_bar as *mut GtkBox, btn_close_tab, 0, 0, 0);
+        gtk_box_pack_start(tab_bar as *mut GtkBox, btn_bookmarks_page, 0, 0, 4);
+
+        connect_signal(btn_new_tab, "clicked", on_new_tab_clicked as GCallback);
+        connect_signal(btn_close_tab, "clicked", on_close_tab_clicked as GCallback);
+        connect_signal(
+            btn_bookmarks_page,
+            "clicked",
+            on_bookmarks_page_clicked as GCallback,
+        );
+
+        // 4. GEZİNME VE ADRES ÇUBUĞU (Navigation Toolbar)
         let toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-        gtk_container_set_border_width(toolbar as *mut GtkContainer, 6);
+        gtk_container_set_border_width(toolbar as *mut GtkContainer, 4);
         gtk_box_pack_start(vbox as *mut GtkBox, toolbar, 0, 1, 0);
 
         let btn_back = gtk_button_new_with_label(to_cstr("<-").as_ptr());
@@ -464,10 +587,11 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) -> bool {
         let btn_example = gtk_button_new_with_label(to_cstr("HTTPS Example").as_ptr());
         let url_entry = gtk_entry_new();
         let btn_go = gtk_button_new_with_label(to_cstr("Git ->").as_ptr());
+        let btn_bookmark_toggle = gtk_button_new_with_label(to_cstr("☆ Yer Imi").as_ptr());
 
         gtk_entry_set_text(
             url_entry as *mut GtkEntry,
-            to_cstr(&state.current_url).as_ptr(),
+            to_cstr(state.current_url()).as_ptr(),
         );
 
         gtk_box_pack_start(toolbar as *mut GtkBox, btn_back, 0, 0, 0);
@@ -478,6 +602,7 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) -> bool {
         gtk_box_pack_start(toolbar as *mut GtkBox, btn_example, 0, 0, 0);
         gtk_box_pack_start(toolbar as *mut GtkBox, url_entry, 1, 1, 0);
         gtk_box_pack_start(toolbar as *mut GtkBox, btn_go, 0, 0, 0);
+        gtk_box_pack_start(toolbar as *mut GtkBox, btn_bookmark_toggle, 0, 0, 0);
 
         connect_signal(btn_back, "clicked", on_back_clicked as GCallback);
         connect_signal(btn_forward, "clicked", on_forward_clicked as GCallback);
@@ -487,8 +612,13 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) -> bool {
         connect_signal(btn_example, "clicked", on_example_clicked as GCallback);
         connect_signal(btn_go, "clicked", on_navigate_triggered as GCallback);
         connect_signal(url_entry, "activate", on_navigate_triggered as GCallback);
+        connect_signal(
+            btn_bookmark_toggle,
+            "clicked",
+            on_bookmark_toggle_clicked as GCallback,
+        );
 
-        // 4. Orta Web Sayfası Çizim Tuvali (`GtkDrawingArea`)
+        // 5. Orta Web Sayfası Çizim Tuvali (`GtkDrawingArea`)
         let canvas = gtk_drawing_area_new();
         gtk_widget_add_events(
             canvas,
@@ -504,26 +634,31 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) -> bool {
         );
         connect_signal(canvas, "scroll-event", on_canvas_scroll as GCallback);
 
-        // 5. Alt Durum Çubuğu (`GtkLabel`)
+        // 6. Alt Durum Çubuğu (`GtkLabel`)
         let status_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
         gtk_container_set_border_width(status_box as *mut GtkContainer, 6);
-        let status_label = gtk_label_new(to_cstr(&state.status_message).as_ptr());
-        gtk_widget_set_halign(status_label, 1); // Sola hizala (GTK_ALIGN_START = 1)
+        let status_label = gtk_label_new(to_cstr(&state.status_message()).as_ptr());
+        gtk_widget_set_halign(status_label, 1);
         gtk_box_pack_start(status_box as *mut GtkBox, status_label, 1, 1, 4);
         gtk_box_pack_start(vbox as *mut GtkBox, status_box, 0, 1, 0);
 
+        let app = LinuxGuiApp {
+            window: window as usize,
+            tab_buttons,
+            btn_bookmark_toggle: btn_bookmark_toggle as usize,
+            url_entry: url_entry as usize,
+            canvas: canvas as usize,
+            status_label: status_label as usize,
+            state,
+        };
+
+        gtk_widget_show_all(window);
+        arayuzu_guncelle(&app);
+
         if let Ok(mut guard) = LINUX_APP.lock() {
-            *guard = Some(LinuxGuiApp {
-                window: window as usize,
-                url_entry: url_entry as usize,
-                canvas: canvas as usize,
-                status_label: status_label as usize,
-                state,
-            });
+            *guard = Some(app);
         }
 
-        // 6. Tüm bileşenleri ekranda göster ve olay döngüsünü başlat!
-        gtk_widget_show_all(window);
         gtk_main();
         true
     }

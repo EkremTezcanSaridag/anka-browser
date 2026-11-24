@@ -27,82 +27,26 @@ pub fn normalize_address(raw: &str) -> String {
     }
 }
 
-/// 6 İSTASYONLUK MOTORU ATEŞLEYEN ORTAK FONKSİYON:
-/// Verilen adresi alır: anka-url -> anka-net -> anka-html -> anka-css -> anka-layout -> anka-paint
-/// sırasıyla işleyip (Sayfa Başlığı, Durum Mesajı, Çizim Listesi) döndürür.
-pub fn motoru_calistir(
-    hedef_adres: &str,
+/// verilen ham HTML/HTTP yanıtını 6 istasyondan geçirip çizer (örn: `http://anka.local/yer-imleri`).
+pub fn html_motoru_calistir(
+    sayfa_url_str: &str,
+    ham_http_yaniti: &str,
     viewport_width: u32,
 ) -> (Option<String>, String, Vec<PaintCommand>) {
-    let hedef = normalize_address(hedef_adres);
-
-    // İSTASYON 1: anka-url (Adresi Doğrama)
-    let url = match Url::parse(&hedef) {
-        Ok(u) => u,
-        Err(hata) => {
-            return (
-                None,
-                format!("Hata [anka-url] Gecersiz adres ({hedef}): {hata:?}"),
-                Vec::new(),
-            );
-        }
+    let Ok(url) = Url::parse(sayfa_url_str) else {
+        return (None, "Gecersiz dahili URL".to_string(), Vec::new());
     };
-
-    // İSTASYON 2: anka-net (İnternetten veya Dahili Sayfadan HTML İndirme)
-    let yanit = if url.host == "anka.local" {
-        let dahili_http = concat!(
-            "HTTP/1.1 200 OK\r\n",
-            "Content-Type: text/html\r\n\r\n",
-            "<html><head><title>Ana Sayfa</title><style>",
-            "h1 { color: #dc2626; background-color: #fef2f2; border: 1px solid #fecaca; font-size: 30px; }",
-            "h2 { color: #1d4ed8; font-size: 20px; }",
-            "p  { color: #334155; font-size: 16px; }",
-            "li { color: #0f766e; font-size: 16px; }",
-            ".pill { color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; font-size: 15px; }",
-            ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; font-size: 16px; }",
-            "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; font-size: 16px; }",
-            "</style></head><body>",
-            "<h1>Anka Browser v0.2.3 — Telek Engine</h1>",
-            "<nav>",
-            "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
-            "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
-            "<a class=\"pill\" href=\"https://tr.wikipedia.org\">Vikipedi TR</a>",
-            "<a class=\"pill\" href=\"https://text.npr.org\">NPR Lite Haber</a>",
-            "</nav>",
-            "<hr>",
-            "<h2>Modern Kutu Tasarimi (.class, #id, Border) ve Yan Yana Dizilim!</h2>",
-            "<div class=\"kart\"><p>Bu kutu CSS '.kart' sinifi ile arka plan rengi ve cerceve (border) almistir.</p></div>",
-            "<div id=\"duyuru\"><p>Bu kutu ise CSS '#duyuru' kimligi (ID) ile ozel turuncu kutu tasarimi almistir.</p></div>",
-            "<ul>",
-            "<li>CSS .class, #id ve satir ici style='...' secici eslestirmesi</li>",
-            "<li>Kisa linklerin ve menulerin yan yana (inline/yatay) dizilmesi</li>",
-            "<li>Kutu kenarliklari (border) ve <hr> yatay ayirici cizgisi</li>",
-            "</ul>",
-            "</body></html>"
-        );
-        match parse_http_response(dahili_http) {
-            Ok(r) => r,
-            Err(e) => {
-                return (
-                    None,
-                    format!("Hata [anka-net] Dahili yanit hatasi: {e:?}"),
-                    Vec::new(),
-                );
-            }
-        }
-    } else {
-        match fetch(&url) {
-            Ok(resp) => resp,
-            Err(hata) => {
-                return (
-                    None,
-                    format!("Hata [anka-net] Baglanti kurulamadi ({hedef}): {hata:?}"),
-                    Vec::new(),
-                );
-            }
-        }
+    let Ok(yanit) = parse_http_response(ham_http_yaniti) else {
+        return (None, "Dahili HTTP yanit hatasi".to_string(), Vec::new());
     };
+    yaniti_cizime_donustur(&url, &yanit, viewport_width)
+}
 
+fn yaniti_cizime_donustur(
+    url: &Url,
+    yanit: &anka_net::HttpResponse,
+    viewport_width: u32,
+) -> (Option<String>, String, Vec<PaintCommand>) {
     // İSTASYON 3: anka-html (HTML Metnini DOM Ağacına Çevirme ve <title> Çıkarma)
     let dom_agaci = parse_html(&yanit.body);
     let sayfa_basligi = extract_title(&dom_agaci);
@@ -146,7 +90,7 @@ pub fn motoru_calistir(
         "HTTP"
     };
     let durum = format!(
-        "{} {} | {} bayt indirildi | {} satir/kutu Telek Engine v0.2.3 ile cizildi",
+        "{} {} | {} bayt indirildi | {} satir/kutu Telek Engine v0.2.4 ile cizildi",
         protokol_etiketi,
         yanit.status_code,
         yanit.body.len(),
@@ -154,6 +98,85 @@ pub fn motoru_calistir(
     );
 
     (sayfa_basligi, durum, cizim_listesi)
+}
+
+/// 6 İSTASYONLUK MOTORU ATEŞLEYEN ORTAK FONKSİYON:
+/// Verilen adresi alır: anka-url -> anka-net -> anka-html -> anka-css -> anka-layout -> anka-paint
+/// sırasıyla işleyip (Sayfa Başlığı, Durum Mesajı, Çizim Listesi) döndürür.
+pub fn motoru_calistir(
+    hedef_adres: &str,
+    viewport_width: u32,
+) -> (Option<String>, String, Vec<PaintCommand>) {
+    let hedef = normalize_address(hedef_adres);
+
+    // İSTASYON 1: anka-url (Adresi Doğrama)
+    let url = match Url::parse(&hedef) {
+        Ok(u) => u,
+        Err(hata) => {
+            return (
+                None,
+                format!("Hata [anka-url] Gecersiz adres ({hedef}): {hata:?}"),
+                Vec::new(),
+            );
+        }
+    };
+
+    // İSTASYON 2: anka-net (İnternetten veya Dahili Sayfadan HTML İndirme)
+    let yanit = if url.host == "anka.local" {
+        let dahili_http = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: text/html\r\n\r\n",
+            "<html><head><title>Ana Sayfa</title><style>",
+            "h1 { color: #dc2626; background-color: #fef2f2; border: 1px solid #fecaca; font-size: 30px; }",
+            "h2 { color: #1d4ed8; font-size: 20px; }",
+            "p  { color: #334155; font-size: 16px; }",
+            "li { color: #0f766e; font-size: 16px; }",
+            ".pill { color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; font-size: 15px; }",
+            ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; font-size: 16px; }",
+            "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; font-size: 16px; }",
+            "</style></head><body>",
+            "<h1>Anka Browser v0.2.4 — Telek Engine</h1>",
+            "<nav>",
+            "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
+            "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
+            "<a class=\"pill\" href=\"http://anka.local/yer-imleri\">Yer Imlerim</a>",
+            "<a class=\"pill\" href=\"https://tr.wikipedia.org\">Vikipedi TR</a>",
+            "</nav>",
+            "<hr>",
+            "<h2>Coklu Sekme (Multi-Tab) ve Yer Imleri (Bookmarks) Mimarisi!</h2>",
+            "<div class=\"kart\"><p>Ustteki sekme cubugundan yeni sekme (+ Sekme) acabilir, sekmeler arasinda gecis yapabilir ve begendiginiz sayfalari Yer Imlerine (* Yer Imi) kaydedebilirsiniz.</p></div>",
+            "<div id=\"duyuru\"><p>Her sekmenin kendi Geri/Ileri gecmisi ve kaydirma (scroll) konumu birbirinden bagimsiz olarak korunur.</p></div>",
+            "<ul>",
+            "<li>Coklu Sekme (Vec<TabState>) ve sekme gecis/kapatma yonetimi</li>",
+            "<li>Yer Imleri (Bookmarks) kaydetme/cikarma ve anka.local/yer-imleri sayfasi</li>",
+            "<li>Sifir harici crate bagimliligiyla Linux (GTK3/Cairo) ve Windows (Win32/GDI)</li>",
+            "</ul>",
+            "</body></html>"
+        );
+        match parse_http_response(dahili_http) {
+            Ok(r) => r,
+            Err(e) => {
+                return (
+                    None,
+                    format!("Hata [anka-net] Dahili yanit hatasi: {e:?}"),
+                    Vec::new(),
+                );
+            }
+        }
+    } else {
+        match fetch(&url) {
+            Ok(resp) => resp,
+            Err(hata) => {
+                return (
+                    None,
+                    format!("Hata [anka-net] Baglanti kurulamadi ({hedef}): {hata:?}"),
+                    Vec::new(),
+                );
+            }
+        }
+    };
+
+    yaniti_cizime_donustur(&url, &yanit, viewport_width)
 }
 
 fn main() {
@@ -181,7 +204,7 @@ fn main() {
     {
         let (baslik, durum, cizim_listesi) = motoru_calistir(&baslangic_adresi, 860);
         println!(
-            "Anka Browser v0.2.3 ({}) [{}] -> {}",
+            "Anka Browser v0.2.4 ({}) [{}] -> {}",
             baslangic_adresi,
             baslik.unwrap_or_else(|| "Adsız".to_string()),
             durum

@@ -9,7 +9,7 @@ Bu doküman, geliştirme ortamı **Windows'tan Milis Linux'a** taşınırken Ant
 - **Motor Adı:** Telek Engine (*Anka kuşunun uçmasını sağlayan ana kanat tüyü*)
 - **GitHub Deposu:** `https://github.com/EkremTezcanSaridag/anka-browser`
 - **Dil & Yapı:** Rust (`edition = "2024"`, Cargo Workspace / Monorepo, Lisans: `MPL-2.0`)
-- **Mevcut Son Sürüm:** `v0.2.3` (23/23 birim testi başarılı, sıfır `clippy` uyarısı, sıfır üçüncü parti crate bağımlılığı)
+- **Mevcut Son Sürüm:** `v0.2.4` (25/25 birim testi başarılı, sıfır `clippy` uyarısı, sıfır üçüncü parti crate bağımlılığı)
 - **Temel Felsefe:** Hazır bir Chromium/WebKit/Gecko fork'u veya WebView kabuğu **değildir**. URL ayrıştırmadan ağ katmanına, HTML/DOM ağacından CSS, Layout ve Paint aşamasına kadar tüm boru hattı (pipeline) sıfırdan, eğitici ve anlaşılır Türkçe yorum satırlarıyla yazılmaktadır.
 
 ---
@@ -37,7 +37,7 @@ Bu doküman, geliştirme ortamı **Windows'tan Milis Linux'a** taşınırken Ant
 | **`crates/anka-css`** | `parse_css`: Seçici (`selector`) ve özellik (`Declaration`: `property`, `value`) ayrıştırıcı. | 2 ✅ |
 | **`crates/anka-layout`** | `compute_layout`: DOM + CSS birleştirme, `selector_matches` (`tag`, `.class`, `#id`, `tag.class`), satır içi `style="..."`, otomatik satır kaydırma (`wrap_text`), `<li>` madde işareti (`• `), `<hr>` yatay çizgi, kısa `<a>`/`<span>`/`<button>` öğelerinin yan yana (`inline`) dizilimi, `bg_color` ve `border_color`. | 3 ✅ |
 | **`crates/anka-paint`** | `build_display_list`: İngilizce renk adlarını ve 6/3 haneli Hex renk kodlarını (`#ff5733`, `#0f0`) `RgbColor` piksellerine ve `PaintCommand` listesine dönüştürme. | 2 ✅ |
-| **`crates/anka-browser`** | `motoru_calistir`, akıllı adres çubuğu (`normalize_address`), işletim sisteminden bağımsız ortak tarayıcı durumu (`browser_state.rs`), Windows için Win32 GDI masaüstü penceresi (`win32_gui.rs`), Linux (Wayland/X11) için GTK3 + Cairo 2D masaüstü penceresi (`linux_gui.rs`) ve CI için terminal önizlemesi (`main.rs`). | 2 ✅ |
+| **`crates/anka-browser`** | `motoru_calistir`, akıllı adres çubuğu (`normalize_address`), çoklu sekme (`Vec<TabState>`) ve yer imleri (`Vec<Bookmark>`, `anka.local/yer-imleri`) destekli ortak tarayıcı durumu (`browser_state.rs`), Windows için Win32 GDI masaüstü penceresi (`win32_gui.rs`), Linux (Wayland/X11) için GTK3 + Cairo 2D masaüstü penceresi (`linux_gui.rs`) ve CI için terminal önizlemesi (`main.rs`). | 4 ✅ |
 
 ---
 
