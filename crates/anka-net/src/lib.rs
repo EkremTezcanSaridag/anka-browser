@@ -59,8 +59,10 @@ pub struct HttpResponse {
     pub status_code: u16,
     // Sunucunun gönderdiği başlıklar (örn: Content-Type, Content-Length)
     pub headers: Vec<(String, String)>,
-    // Sunucunun gönderdiği HTML metni
+    // Sunucunun gönderdiği HTML/CSS metni (UTF-8 görünümü)
     pub body: String,
+    // Sunucunun gönderdiği bozulmamış ham baytlar (BMP, PNG, JPEG gibi görseller için!)
+    pub raw_body: Vec<u8>,
 }
 
 impl HttpResponse {
@@ -159,37 +161,43 @@ fn fetch_once(url: &Url) -> Result<HttpResponse, NetError> {
     // Mektubu internet kablosundan karşı sunucuya gönder!
     stream.write_all(request.as_bytes())?;
 
-    // 6. ADIM: Sunucunun gönderdiği cevabı sonuna kadar oku
-    let mut raw_response = String::new();
-    stream.read_to_string(&mut raw_response)?;
+    // 6. ADIM: Sunucunun gönderdiği cevabı ham bayt (`Vec<u8>`) olarak sonuna kadar oku!
+    // (Böylece sadece metin değil, BMP/PNG/JPEG gibi ikili görsel dosyaları da bozulmadan indirilir!)
+    let mut raw_response = Vec::new();
+    stream.read_to_end(&mut raw_response)?;
 
     // 7. ADIM: Gelen ham cevabı doğrayıp HttpResponse kutusuna yerleştir
-    parse_http_response(&raw_response)
+    parse_http_response_bytes(&raw_response)
 }
 
 /// Sunucudan gelen ham HTTP metnini doğrayarak `HttpResponse` paketine çevirir.
 /// Örnek girdi:
 /// "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html>Merhaba</html>"
 pub fn parse_http_response(raw: &str) -> Result<HttpResponse, NetError> {
-    // 1. ADIM: Yanıtı boş satırdan ("\r\n\r\n") ikiye kes:
-    // Üst kısım = Durum satırı ve başlıklar (headers)
-    // Alt kısım = HTML gövdesi (body)
-    let (header_section, body) = match raw.split_once("\r\n\r\n") {
-        Some((h, b)) => (h, b),
-        None => return Err(NetError::InvalidResponse),
-    };
+    parse_http_response_bytes(raw.as_bytes())
+}
 
-    // Üst kısmı satır satır okumak için bir okuyucu (iterator) başlat
+/// Sunucudan gelen ham HTTP baytlarını (`&[u8]`) başlıklar ve ikili gövde (`raw_body`)
+/// olarak ayırır. HTML/CSS metinleri yanında ikili resim dosyalarını (BMP, PNG, JPEG)
+/// tek bir baytını bile bozmadan saklar.
+pub fn parse_http_response_bytes(raw: &[u8]) -> Result<HttpResponse, NetError> {
+    // 1. ADIM: Yanıtı boş satırdan (`\r\n\r\n`) ikiye kes:
+    // Üst kısım = Durum satırı ve başlıklar (ASCII metin)
+    // Alt kısım = Ham gövde baytları (HTML veya ikili resim dosyası)
+    let split_pos = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or(NetError::InvalidResponse)?;
+
+    let header_bytes = &raw[..split_pos];
+    let body_bytes = &raw[split_pos + 4..];
+
+    let header_section = String::from_utf8_lossy(header_bytes);
     let mut lines = header_section.lines();
 
     // 2. ADIM: İlk satırı oku (Örn: "HTTP/1.1 200 OK")
-    let status_line = match lines.next() {
-        Some(line) => line,
-        None => return Err(NetError::InvalidResponse),
-    };
+    let status_line = lines.next().ok_or(NetError::InvalidResponse)?;
 
-    // İlk satırı boşluklardan böl: ["HTTP/1.1", "200", "OK"]
-    // 2. kelime olan "200" sayısını al ve u16 tam sayısına çevir
     let mut parts = status_line.split_whitespace();
     let _http_version = parts.next().ok_or(NetError::InvalidResponse)?;
     let status_code_str = parts.next().ok_or(NetError::InvalidResponse)?;
@@ -197,7 +205,7 @@ pub fn parse_http_response(raw: &str) -> Result<HttpResponse, NetError> {
         .parse::<u16>()
         .map_err(|_| NetError::InvalidResponse)?;
 
-    // 3. ADIM: Kalan satırlardaki başlıkları ("Content-Type: text/html") tek tek ayır
+    // 3. ADIM: Kalan satırlardaki başlıkları ("Content-Type: image/png") tek tek ayır
     let mut headers = Vec::new();
     for line in lines {
         if let Some((key, value)) = line.split_once(':') {
@@ -205,36 +213,49 @@ pub fn parse_http_response(raw: &str) -> Result<HttpResponse, NetError> {
         }
     }
 
-    // 4. ADIM: Eğer sunucu veriyi parça parça (`Transfer-Encoding: chunked`) gönderdiyse birleştir!
+    // 4. ADIM: Eğer sunucu veriyi parça parça (`Transfer-Encoding: chunked`) gönderdiyse bayt düzeyinde birleştir!
     let is_chunked = headers.iter().any(|(k, v)| {
         k.eq_ignore_ascii_case("transfer-encoding") && v.to_lowercase().contains("chunked")
     });
-    let final_body = if is_chunked {
-        decode_chunked(body)?
+    let final_raw_body = if is_chunked {
+        decode_chunked_bytes(body_bytes)?
     } else {
-        body.to_string()
+        body_bytes.to_vec()
     };
+
+    let body = String::from_utf8_lossy(&final_raw_body).into_owned();
 
     // 5. ADIM: Hazırladığımız HttpResponse kutusunu döndür!
     Ok(HttpResponse {
         status_code,
         headers,
-        body: final_body,
+        body,
+        raw_body: final_raw_body,
     })
 }
 
-/// `Transfer-Encoding: chunked` formatında gelen HTTP gövdesini birleştirir.
+/// `Transfer-Encoding: chunked` formatında gelen HTTP gövdesini metin olarak birleştirir.
 /// Örnek: `"7\r\nMerhaba\r\n5\r\n Anka\r\n0\r\n\r\n"` -> `"Merhaba Anka"`
 pub fn decode_chunked(raw_body: &str) -> Result<String, NetError> {
-    let mut result = String::new();
+    let bytes = decode_chunked_bytes(raw_body.as_bytes())?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// `Transfer-Encoding: chunked` formatında gelen ham baytları (HTML veya ikili resim) birleştirir.
+pub fn decode_chunked_bytes(raw_body: &[u8]) -> Result<Vec<u8>, NetError> {
+    let mut result = Vec::new();
     let mut kalan = raw_body;
 
     loop {
-        let Some((size_line, rest)) = kalan.split_once("\r\n") else {
+        let Some(crlf_pos) = kalan.windows(2).position(|w| w == b"\r\n") else {
             return Err(NetError::InvalidResponse);
         };
+        let size_line = String::from_utf8_lossy(&kalan[..crlf_pos]);
+        let rest = &kalan[crlf_pos + 2..];
+
         let size_hex = size_line.split(';').next().unwrap_or("").trim();
-        let chunk_size = usize::from_str_radix(size_hex, 16).map_err(|_| NetError::InvalidResponse)?;
+        let chunk_size =
+            usize::from_str_radix(size_hex, 16).map_err(|_| NetError::InvalidResponse)?;
 
         // 0 uzunluğundaki parça verinin bittiğini gösterir
         if chunk_size == 0 {
@@ -245,10 +266,9 @@ pub fn decode_chunked(raw_body: &str) -> Result<String, NetError> {
             return Err(NetError::InvalidResponse);
         }
 
-        result.push_str(&rest[..chunk_size]);
-        kalan = rest[chunk_size..]
-            .strip_prefix("\r\n")
-            .unwrap_or(&rest[chunk_size..]);
+        result.extend_from_slice(&rest[..chunk_size]);
+        let after_chunk = &rest[chunk_size..];
+        kalan = after_chunk.strip_prefix(b"\r\n").unwrap_or(after_chunk);
     }
 
     Ok(result)
@@ -303,5 +323,17 @@ mod tests {
 
         assert_eq!(yanit.status_code, 200);
         assert_eq!(yanit.body, "Merhaba Anka");
+    }
+
+    #[test]
+    fn test_ikili_resim_baytlari_koruma() {
+        // PNG dosyalarının standart başlangıç imzası (UTF-8 olmayan ikili baytlar içerir: 0x89, 0xFF)
+        let mut ham_paket = b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\n\r\n".to_vec();
+        let png_baytlari = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xFF, 0x00];
+        ham_paket.extend_from_slice(&png_baytlari);
+
+        let yanit = parse_http_response_bytes(&ham_paket).unwrap();
+        assert_eq!(yanit.status_code, 200);
+        assert_eq!(yanit.raw_body, png_baytlari);
     }
 }

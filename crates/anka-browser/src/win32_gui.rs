@@ -122,6 +122,30 @@ struct PAINTSTRUCT {
     rgbReserved: [u8; 32],
 }
 
+#[repr(C)]
+struct BITMAPINFOHEADER {
+    biSize: u32,
+    biWidth: i32,
+    biHeight: i32,
+    biPlanes: u16,
+    biBitCount: u16,
+    biCompression: u32,
+    biSizeImage: u32,
+    biXPelsPerMeter: i32,
+    biYPelsPerMeter: i32,
+    biClrUsed: u32,
+    biClrImportant: u32,
+}
+
+#[repr(C)]
+struct BITMAPINFO {
+    bmiHeader: BITMAPINFOHEADER,
+    bmiColors: [u32; 1],
+}
+
+const DIB_RGB_COLORS: u32 = 0;
+const SRCCOPY: u32 = 0x00CC_0020;
+
 #[link(name = "kernel32")]
 unsafe extern "system" {
     fn GetModuleHandleW(lpModuleName: *const u16) -> HINSTANCE;
@@ -189,6 +213,21 @@ unsafe extern "system" {
         pszFaceName: *const u16,
     ) -> HFONT;
     fn SelectObject(hdc: HDC, h: HGDIOBJ) -> HGDIOBJ;
+    fn StretchDIBits(
+        hdc: HDC,
+        xDest: i32,
+        yDest: i32,
+        DestWidth: i32,
+        DestHeight: i32,
+        xSrc: i32,
+        ySrc: i32,
+        SrcWidth: i32,
+        SrcHeight: i32,
+        lpBits: *const c_void,
+        lpbmi: *const BITMAPINFO,
+        iUsage: u32,
+        rop: u32,
+    ) -> i32;
 }
 
 struct PencereDurumu {
@@ -796,6 +835,55 @@ unsafe extern "system" fn wnd_proc(
                                 DeleteObject(bg_brush as HGDIOBJ);
                             }
 
+                            // Eğer kutu çözülmüş bir `<img>` görseli içeriyorsa Win32 `StretchDIBits` ile çiz!
+                            let mut gorsel_cizildi = false;
+                            if let Some(img) = &komut.image
+                                && img.width > 0
+                                && img.height > 0
+                            {
+                                let mut bgra = Vec::with_capacity(img.rgba.len());
+                                let (px_chunks, _) = img.rgba.as_chunks::<4>();
+                                for &[r, g, b, a] in px_chunks {
+                                    bgra.push(b);
+                                    bgra.push(g);
+                                    bgra.push(r);
+                                    bgra.push(a);
+                                }
+                                let bmi = BITMAPINFO {
+                                    bmiHeader: BITMAPINFOHEADER {
+                                        biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                                        biWidth: img.width as i32,
+                                        // Negatif yükseklik: Piksel verisinin yukarıdan aşağıya sıralı olduğunu bildirir
+                                        biHeight: -(img.height as i32),
+                                        biPlanes: 1,
+                                        biBitCount: 32,
+                                        biCompression: 0,
+                                        biSizeImage: 0,
+                                        biXPelsPerMeter: 0,
+                                        biYPelsPerMeter: 0,
+                                        biClrUsed: 0,
+                                        biClrImportant: 0,
+                                    },
+                                    bmiColors: [0],
+                                };
+                                StretchDIBits(
+                                    hdc,
+                                    box_rect.left,
+                                    box_rect.top,
+                                    (box_rect.right - box_rect.left).max(1),
+                                    (box_rect.bottom - box_rect.top).max(1),
+                                    0,
+                                    0,
+                                    img.width as i32,
+                                    img.height as i32,
+                                    bgra.as_ptr().cast::<c_void>(),
+                                    &bmi,
+                                    DIB_RGB_COLORS,
+                                    SRCCOPY,
+                                );
+                                gorsel_cizildi = true;
+                            }
+
                             // Eğer kutunun CSS çerçevesi (`border`) varsa etrafına çerçeve çiz!
                             if let Some(border) = &komut.border_color {
                                 let border_brush =
@@ -804,7 +892,7 @@ unsafe extern "system" fn wnd_proc(
                                 DeleteObject(border_brush as HGDIOBJ);
                             }
 
-                            if !komut.text.is_empty() {
+                            if !gorsel_cizildi && !komut.text.is_empty() {
                                 TextOutW(
                                     hdc,
                                     draw_x + 4,
