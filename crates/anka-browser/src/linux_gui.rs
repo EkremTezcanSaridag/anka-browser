@@ -20,6 +20,7 @@ type GtkEntry = c_void;
 type GtkLabel = c_void;
 type GdkEvent = c_void;
 type CairoT = c_void;
+type CairoSurfaceT = c_void;
 type GCallback = *const c_void;
 
 // GTK Sabitleri:
@@ -36,10 +37,11 @@ const GDK_SMOOTH_SCROLL_MASK: c_int = 1 << 23;
 const GDK_SCROLL_UP: c_int = 0;
 const GDK_SCROLL_DOWN: c_int = 1;
 
-// Cairo Yazı Kalınlığı (`cairo_font_weight_t`):
+// Cairo Yazı Kalınlığı (`cairo_font_weight_t`) ve Görsel Formatı (`CAIRO_FORMAT_ARGB32`):
 const CAIRO_FONT_SLANT_NORMAL: c_int = 0;
 const CAIRO_FONT_WEIGHT_NORMAL: c_int = 0;
 const CAIRO_FONT_WEIGHT_BOLD: c_int = 1;
+const CAIRO_FORMAT_ARGB32: c_int = 0;
 
 // Sekme çubuğunda aynı anda gösterilecek maksimum hızlı sekme butonu sayısı:
 const MAX_TAB_SLOTS: usize = 5;
@@ -135,6 +137,25 @@ unsafe extern "C" {
     fn cairo_set_font_size(cr: *mut CairoT, size: c_double);
     fn cairo_move_to(cr: *mut CairoT, x: c_double, y: c_double);
     fn cairo_show_text(cr: *mut CairoT, utf8: *const c_char);
+    fn cairo_image_surface_create_for_data(
+        data: *mut u8,
+        format: c_int,
+        width: c_int,
+        height: c_int,
+        stride: c_int,
+    ) -> *mut CairoSurfaceT;
+    fn cairo_set_source_surface(
+        cr: *mut CairoT,
+        surface: *mut CairoSurfaceT,
+        x: c_double,
+        y: c_double,
+    );
+    fn cairo_surface_destroy(surface: *mut CairoSurfaceT);
+    fn cairo_save(cr: *mut CairoT);
+    fn cairo_restore(cr: *mut CairoT);
+    fn cairo_translate(cr: *mut CairoT, tx: c_double, ty: c_double);
+    fn cairo_scale(cr: *mut CairoT, sx: c_double, sy: c_double);
+    fn cairo_paint(cr: *mut CairoT);
 }
 
 /// Linux penceresinin arayüz bileşenlerini ve ortak `BrowserState` durumunu tutan yapı:
@@ -465,6 +486,50 @@ unsafe extern "C" fn on_canvas_draw(
                     cairo_fill(cr);
                 }
 
+                // 2B. Eğer bu kutu çözülmüş gerçek bir `<img>` görseli içeriyorsa Cairo ile pikselleri çiz!
+                let mut gorsel_cizildi = false;
+                if let Some(img) = &komut.image
+                    && img.width > 0
+                    && img.height > 0
+                {
+                    // Cairo'nun `CAIRO_FORMAT_ARGB32` biçimi little-endian x86_64'te `[B, G, R, A]`
+                    // (premultiplied alpha) sırasını bekler:
+                    let mut bgra = Vec::with_capacity(img.rgba.len());
+                    let (px_chunks, _) = img.rgba.as_chunks::<4>();
+                    for &[r_raw, g_raw, b_raw, a_raw] in px_chunks {
+                        let a = a_raw as u16;
+                        let r = ((r_raw as u16 * a) / 255) as u8;
+                        let g = ((g_raw as u16 * a) / 255) as u8;
+                        let b = ((b_raw as u16 * a) / 255) as u8;
+                        bgra.push(b);
+                        bgra.push(g);
+                        bgra.push(r);
+                        bgra.push(a_raw);
+                    }
+                    let stride = (img.width * 4) as c_int;
+                    let surface = cairo_image_surface_create_for_data(
+                        bgra.as_mut_ptr(),
+                        CAIRO_FORMAT_ARGB32,
+                        img.width as c_int,
+                        img.height as c_int,
+                        stride,
+                    );
+                    if !surface.is_null() {
+                        cairo_save(cr);
+                        cairo_translate(cr, draw_x - 4.0, draw_y - 2.0);
+                        cairo_scale(
+                            cr,
+                            box_w / (img.width as c_double),
+                            box_h / (img.height as c_double),
+                        );
+                        cairo_set_source_surface(cr, surface, 0.0, 0.0);
+                        cairo_paint(cr);
+                        cairo_restore(cr);
+                        cairo_surface_destroy(surface);
+                        gorsel_cizildi = true;
+                    }
+                }
+
                 // 3. Kutu çerçevesi (`border`)
                 if let Some(border) = &komut.border_color {
                     cairo_set_source_rgb(
@@ -478,8 +543,8 @@ unsafe extern "C" fn on_canvas_draw(
                     cairo_stroke(cr);
                 }
 
-                // 4. Metin ve link alt çizgisi
-                if !komut.text.is_empty() {
+                // 4. Metin ve link alt çizgisi (Gerçek resim çizildiyse `alt` metnini üstüne basma)
+                if !gorsel_cizildi && !komut.text.is_empty() {
                     let weight = if matches!(komut.tag.as_str(), "h1" | "h2" | "h3") {
                         CAIRO_FONT_WEIGHT_BOLD
                     } else {

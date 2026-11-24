@@ -130,8 +130,8 @@ impl BrowserState {
     pub fn window_title(&self) -> String {
         let tab_info = format!("[Sekme {}/{}]", self.active_tab + 1, self.tabs.len());
         match &self.active().page_title {
-            Some(t) => format!("{t} {tab_info} — Anka Browser v0.2.4"),
-            None => format!("Anka Browser v0.2.4 {tab_info} — Telek Engine"),
+            Some(t) => format!("{t} {tab_info} — Anka Browser v0.2.5"),
+            None => format!("Anka Browser v0.2.5 {tab_info} — Telek Engine"),
         }
     }
 

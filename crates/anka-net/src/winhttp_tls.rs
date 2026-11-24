@@ -175,6 +175,7 @@ pub fn fetch_https(url: &Url) -> Result<HttpResponse, NetError> {
             status_code: status_code_u32 as u16,
             headers: vec![("X-Anka-Transport".to_string(), "HTTPS/TLS".to_string())],
             body,
+            raw_body: body_bytes,
         })
     }
 }

@@ -38,6 +38,9 @@ pub struct LayoutBox {
 
     // Eğer bu kutu bir link (<a>) ise hedef adresi
     pub href: Option<String>,
+
+    // Eğer bu kutu bir görsel (<img>) ise kaynak adresi (`src="..."`)
+    pub image_src: Option<String>,
 }
 
 /// Ağaçta yukarıdan aşağıya inerken ebeveyn etiketlerden miras alınan bağlam bilgisi:
@@ -189,8 +192,61 @@ fn layout_node(
                     border_color: None,
                     font_size: 4,
                     href: None,
+                    image_src: None,
                 });
                 *current_y += 18;
+                return;
+            }
+
+            // `<img src="..." alt="..." width="..." height="...">` etiketi:
+            // Görselin ekrandaki yerini ve boyutunu hesaplayıp kutu olarak yerleştir!
+            if tag_name == "img" {
+                if *inline_x > 16 {
+                    *current_y += *last_inline_height + 12;
+                    *inline_x = 16;
+                    *last_inline_height = 0;
+                }
+
+                let src = node.get_attribute("src").unwrap_or("").trim().to_string();
+                let alt = node.get_attribute("alt").unwrap_or("").trim();
+
+                let max_img_w = viewport_width.saturating_sub(32).max(120);
+                let img_w = node
+                    .get_attribute("width")
+                    .and_then(|w| w.trim_end_matches("px").trim().parse::<u32>().ok())
+                    .unwrap_or(280)
+                    .clamp(48, max_img_w);
+                let img_h = node
+                    .get_attribute("height")
+                    .and_then(|h| h.trim_end_matches("px").trim().parse::<u32>().ok())
+                    .unwrap_or(140)
+                    .clamp(36, 420);
+
+                let etiket_yazisi = if !alt.is_empty() {
+                    format!("[Gorsel: {alt}]")
+                } else if !src.is_empty() {
+                    let dosya_adi = src.rsplit('/').next().unwrap_or(&src);
+                    format!("[Gorsel: {dosya_adi}]")
+                } else {
+                    "[Gorsel]".to_string()
+                };
+
+                boxes.push(LayoutBox {
+                    tag: "img".to_string(),
+                    text: etiket_yazisi,
+                    x: 16,
+                    y: *current_y,
+                    width: img_w,
+                    height: img_h,
+                    color: "#475569".to_string(),
+                    bg_color: Some("#f1f5f9".to_string()),
+                    border_color: Some("#94a3b8".to_string()),
+                    font_size: 14,
+                    href: ctx.href.clone(),
+                    image_src: if src.is_empty() { None } else { Some(src) },
+                });
+
+                *current_y += img_h + 14;
                 return;
             }
 
@@ -339,6 +395,7 @@ fn layout_node(
                     border_color,
                     font_size,
                     href: ctx.href.clone(),
+                    image_src: None,
                 });
 
                 *inline_x += item_w + 12;
@@ -380,6 +437,7 @@ fn layout_node(
                     border_color: border_color.clone(),
                     font_size,
                     href: ctx.href.clone(),
+                    image_src: None,
                 });
 
                 if idx + 1 < line_count {
@@ -454,5 +512,22 @@ mod tests {
         assert_eq!(kutular[2].bg_color, Some("#e0f2fe".to_string()));
         assert_eq!(kutular[2].border_color, Some("#0284c7".to_string()));
         assert_eq!(kutular[2].color, "#0369a1");
+    }
+
+    #[test]
+    fn test_img_etiketi_kutu_yerlesimi() {
+        let html = "<body><h1>Galeri</h1><img src=\"/logo.bmp\" alt=\"Anka Logosu\" width=\"320\" height=\"120\"><p>Alt yazi</p></body>";
+        let dom = parse_html(html);
+        let kutular = compute_layout(&dom, &[], 800);
+
+        assert_eq!(kutular.len(), 3);
+        let img = &kutular[1];
+        assert_eq!(img.tag, "img");
+        assert_eq!(img.image_src.as_deref(), Some("/logo.bmp"));
+        assert_eq!(img.text, "[Gorsel: Anka Logosu]");
+        assert_eq!(img.width, 320);
+        assert_eq!(img.height, 120);
+        // Paragraf kutusu görselin bittiği yüksekliğin altına yerleşmeli!
+        assert!(kutular[2].y >= img.y + img.height);
     }
 }

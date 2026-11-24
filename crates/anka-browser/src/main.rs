@@ -4,7 +4,7 @@ use anka_css::parse_css;
 use anka_html::{extract_styles, extract_stylesheet_links, extract_title, parse_html};
 use anka_layout::compute_layout;
 use anka_net::{fetch, parse_http_response};
-use anka_paint::{PaintCommand, build_display_list};
+use anka_paint::{DecodedImage, PaintCommand, build_display_list};
 use anka_url::Url;
 
 #[cfg(any(windows, target_os = "linux", test))]
@@ -81,8 +81,34 @@ fn yaniti_cizime_donustur(
     // İSTASYON 5: anka-layout (Kutuların Ekrandaki X, Y Koordinatlarını ve Satır Kaydırmayı Hesaplama)
     let yerlesim_kutulari = compute_layout(&dom_agaci, &css_kurallari, viewport_width);
 
-    // İSTASYON 6: anka-paint (RGB Çizim Listesini Üretme)
-    let cizim_listesi = build_display_list(&yerlesim_kutulari);
+    // İSTASYON 6: anka-paint (RGB Çizim Listesini Üretme ve `<img>` Görsellerini Çözme)
+    let mut cizim_listesi = build_display_list(&yerlesim_kutulari);
+
+    // Sayfadaki `<img>` etiketleri için görselleri indirip piksellerine (`DecodedImage`) çöz (en fazla 6 görsel):
+    let mut indirilen_gorsel = 0usize;
+    for komut in &mut cizim_listesi {
+        if let Some(src) = &komut.image_src {
+            // A) Dahili Anka test görseli (`http://anka.local/anka-logo.bmp` veya `/anka-logo.bmp`)
+            if src.contains("anka-logo") {
+                komut.image = Some(DecodedImage::generate_anka_banner(
+                    komut.width,
+                    komut.height,
+                ));
+                continue;
+            }
+
+            // B) Gerçek internet üzerindeki görseller (`https://...` veya bağıl `/resim.png`)
+            if indirilen_gorsel < 6
+                && url.host != "anka.local"
+                && let Ok(img_url) = url.resolve(src)
+                && let Ok(img_resp) = fetch(&img_url)
+                && let Some(decoded) = DecodedImage::decode_bytes(&img_resp.raw_body)
+            {
+                komut.image = Some(decoded);
+                indirilen_gorsel += 1;
+            }
+        }
+    }
 
     let protokol_etiketi = if url.scheme == "https" {
         "HTTPS/TLS"
@@ -90,7 +116,7 @@ fn yaniti_cizime_donustur(
         "HTTP"
     };
     let durum = format!(
-        "{} {} | {} bayt indirildi | {} satir/kutu Telek Engine v0.2.4 ile cizildi",
+        "{} {} | {} bayt indirildi | {} satir/kutu Telek Engine v0.2.5 ile cizildi",
         protokol_etiketi,
         yanit.status_code,
         yanit.body.len(),
@@ -135,7 +161,7 @@ pub fn motoru_calistir(
             ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; font-size: 16px; }",
             "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; font-size: 16px; }",
             "</style></head><body>",
-            "<h1>Anka Browser v0.2.4 — Telek Engine</h1>",
+            "<h1>Anka Browser v0.2.5 — Telek Engine</h1>",
             "<nav>",
             "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
             "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
@@ -143,12 +169,13 @@ pub fn motoru_calistir(
             "<a class=\"pill\" href=\"https://tr.wikipedia.org\">Vikipedi TR</a>",
             "</nav>",
             "<hr>",
-            "<h2>Coklu Sekme (Multi-Tab) ve Yer Imleri (Bookmarks) Mimarisi!</h2>",
-            "<div class=\"kart\"><p>Ustteki sekme cubugundan yeni sekme (+ Sekme) acabilir, sekmeler arasinda gecis yapabilir ve begendiginiz sayfalari Yer Imlerine (* Yer Imi) kaydedebilirsiniz.</p></div>",
-            "<div id=\"duyuru\"><p>Her sekmenin kendi Geri/Ileri gecmisi ve kaydirma (scroll) konumu birbirinden bagimsiz olarak korunur.</p></div>",
+            "<img src=\"http://anka.local/anka-logo.bmp\" alt=\"Anka Telek Engine Piksel Amblemi\" width=\"380\" height=\"110\">",
+            "<h2>Gercek Gorsel (&lt;img&gt;) Cizimi, Coklu Sekme ve Yer Imleri!</h2>",
+            "<div class=\"kart\"><p>Yukaridaki gorsel Telek Engine'in sifir bagimlilikli piksel motoruyla (Linux Cairo &amp; Windows GDI) gercek RGB pikselleri olarak cizilmistir.</p></div>",
+            "<div id=\"duyuru\"><p>BMP ve PPM gorselleri saf Rust cozucumuzle, Linux'ta PNG/JPEG/GIF/WebP gorselleri ise sistem gdk-pixbuf motoruyla cozulur.</p></div>",
             "<ul>",
-            "<li>Coklu Sekme (Vec<TabState>) ve sekme gecis/kapatma yonetimi</li>",
-            "<li>Yer Imleri (Bookmarks) kaydetme/cikarma ve anka.local/yer-imleri sayfasi</li>",
+            "<li>&lt;img src=&quot;...&quot; alt=&quot;...&quot; width=&quot;...&quot; height=&quot;...&quot;&gt; kutu yerlesimi ve gercek piksel cizimi</li>",
+            "<li>Coklu Sekme (Vec&lt;TabState&gt;) ve Yer Imleri (anka.local/yer-imleri)</li>",
             "<li>Sifir harici crate bagimliligiyla Linux (GTK3/Cairo) ve Windows (Win32/GDI)</li>",
             "</ul>",
             "</body></html>"
@@ -204,7 +231,7 @@ fn main() {
     {
         let (baslik, durum, cizim_listesi) = motoru_calistir(&baslangic_adresi, 860);
         println!(
-            "Anka Browser v0.2.4 ({}) [{}] -> {}",
+            "Anka Browser v0.2.5 ({}) [{}] -> {}",
             baslangic_adresi,
             baslik.unwrap_or_else(|| "Adsız".to_string()),
             durum

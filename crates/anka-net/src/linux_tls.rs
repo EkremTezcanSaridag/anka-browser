@@ -10,7 +10,7 @@ use std::os::fd::AsRawFd;
 
 use anka_url::Url;
 
-use crate::{HttpResponse, NetError, parse_http_response};
+use crate::{HttpResponse, NetError, parse_http_response_bytes};
 
 // OpenSSL'in C dilindeki opak (iç yapısı gizli) işaretçi tipleri:
 type SslMethod = c_void;
@@ -175,10 +175,9 @@ pub fn fetch_https_once(url: &Url) -> Result<HttpResponse, NetError> {
             raw_bytes.extend_from_slice(&buf[..n as usize]);
         }
 
-        // 10. ADIM: İndirilen yanıtı UTF-8 metnine çevir ve kendi HTTP doğrayıcımıza (`parse_http_response`) ver!
-        // Böylece HTTP başlıkları, `Location` yönlendirmeleri ve `Transfer-Encoding: chunked`
-        // birleştirmesi HTTPS üzerinde de kusursuz çalışır!
-        let raw_response = String::from_utf8_lossy(&raw_bytes);
-        parse_http_response(&raw_response)
+        // 10. ADIM: İndirilen ham baytları bozmadan HTTP doğrayıcımıza (`parse_http_response_bytes`) ver!
+        // Böylece hem HTML/CSS metinleri hem de PNG/JPEG/BMP ikili görselleri tek bir baytı
+        // bile bozulmadan ayrıştırılır!
+        parse_http_response_bytes(&raw_bytes)
     }
 }
