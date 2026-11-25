@@ -39,10 +39,12 @@ const WM_PAINT: u32 = 0x000F;
 const WM_COMMAND: u32 = 0x0111;
 const WM_SETFONT: u32 = 0x0030;
 const WM_KEYDOWN: u32 = 0x0100;
+const WM_CHAR: u32 = 0x0102;
 const WM_MOUSEMOVE: u32 = 0x0200;
 const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_MOUSEWHEEL: u32 = 0x020A;
 
+const VK_BACK: usize = 0x08;
 const VK_RETURN: usize = 0x0D;
 const IDC_ARROW: *const u16 = 32512 as *const u16;
 const IDC_HAND: *const u16 = 32649 as *const u16;
@@ -187,6 +189,7 @@ unsafe extern "system" {
     fn SetWindowTextW(hWnd: HWND, lpString: *const u16) -> i32;
     fn MoveWindow(hWnd: HWND, x: i32, y: i32, nWidth: i32, nHeight: i32, bRepaint: i32) -> i32;
     fn SendMessageW(hWnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) -> LRESULT;
+    fn SetFocus(hWnd: HWND) -> HWND;
 }
 
 #[link(name = "gdi32")]
@@ -707,7 +710,12 @@ unsafe extern "system" fn wnd_proc(
                 let mut guard = DURUM.lock().ok();
                 if let Some(st) = guard.as_mut().and_then(|g| g.as_mut()) {
                     let act = st.state.click_at(click_x, click_y - TOOLBAR_HEIGHT);
-                    if act == ClickAction::JsUpdated {
+                    if st.state.focused_input().is_some() {
+                        unsafe {
+                            SetFocus(hwnd);
+                        }
+                    }
+                    if act == ClickAction::Redraw {
                         pencereyi_yenile(hwnd, st);
                     }
                     act
@@ -718,6 +726,32 @@ unsafe extern "system" fn wnd_proc(
 
             if let ClickAction::Navigate(yeni_adres) = action {
                 sayfayi_yukle_ve_yenile(hwnd, &yeni_adres, true);
+            }
+            0
+        }
+
+        WM_CHAR => {
+            let ch_code = wparam as u32;
+            let mut submit_url: Option<String> = None;
+            if let Ok(mut guard) = DURUM.lock()
+                && let Some(st) = guard.as_mut()
+                && st.state.focused_input().is_some()
+            {
+                if ch_code == VK_BACK as u32 {
+                    st.state.backspace_input();
+                } else if ch_code == VK_RETURN as u32 {
+                    submit_url = st.state.submit_focused_form();
+                } else if let Some(ch) = char::from_u32(ch_code)
+                    && !ch.is_control()
+                {
+                    st.state.type_char(ch);
+                }
+                unsafe {
+                    InvalidateRect(hwnd, null(), 1);
+                }
+            }
+            if let Some(url) = submit_url {
+                sayfayi_yukle_ve_yenile(hwnd, &url, true);
             }
             0
         }
@@ -886,20 +920,52 @@ unsafe extern "system" fn wnd_proc(
                                 gorsel_cizildi = true;
                             }
 
-                            // Eğer kutunun CSS çerçevesi (`border`) varsa etrafına çerçeve çiz!
-                            if let Some(border) = &komut.border_color {
+                            // Eğer kutunun CSS çerçevesi (`border`) varsa veya odaklı `<input>` ise çiz!
+                            let is_focused_input = komut.input_name.is_some()
+                                && st.state.focused_input() == komut.input_name.as_deref();
+                            if is_focused_input {
+                                let border_brush = CreateSolidBrush(rgb(37, 99, 235));
+                                FrameRect(hdc, &box_rect, border_brush);
+                                DeleteObject(border_brush as HGDIOBJ);
+                            } else if let Some(border) = &komut.border_color {
                                 let border_brush =
                                     CreateSolidBrush(rgb(border.r, border.g, border.b));
                                 FrameRect(hdc, &box_rect, border_brush);
                                 DeleteObject(border_brush as HGDIOBJ);
                             }
 
-                            if !gorsel_cizildi && !komut.text.is_empty() {
+                            let mut text_color = komut.color;
+                            let render_text: String = if let Some(input_name) = &komut.input_name {
+                                if let Some(typed) = st.state.input_value(input_name)
+                                    && !typed.is_empty()
+                                {
+                                    text_color = anka_paint::RgbColor {
+                                        r: 15,
+                                        g: 23,
+                                        b: 42,
+                                    };
+                                    if is_focused_input {
+                                        format!("{typed}|")
+                                    } else {
+                                        typed.to_string()
+                                    }
+                                } else if is_focused_input {
+                                    "|".to_string()
+                                } else {
+                                    komut.text.clone()
+                                }
+                            } else {
+                                komut.text.clone()
+                            };
+
+                            if !gorsel_cizildi && !render_text.is_empty() {
+                                SetTextColor(hdc, rgb(text_color.r, text_color.g, text_color.b));
+                                let wide_render = to_wide(&render_text);
                                 let pad = komut.padding as i32;
                                 let box_w = (box_rect.right - box_rect.left).max(1);
-                                let approx_text_w =
-                                    ((komut.text.chars().count() as u32) * (komut.font_size * 56 / 100))
-                                        as i32;
+                                let approx_text_w = ((render_text.chars().count() as u32)
+                                    * (komut.font_size * 56 / 100))
+                                    as i32;
                                 let text_x = match komut.text_align.as_str() {
                                     "center" => box_rect.left + ((box_w - approx_text_w) / 2).max(pad),
                                     "right" => box_rect.left + (box_w - approx_text_w - pad).max(pad),
@@ -909,8 +975,8 @@ unsafe extern "system" fn wnd_proc(
                                     hdc,
                                     text_x,
                                     draw_y + 2 + pad,
-                                    wide_text.as_ptr(),
-                                    (wide_text.len() - 1) as i32,
+                                    wide_render.as_ptr(),
+                                    (wide_render.len() - 1) as i32,
                                 );
                             }
                         }
@@ -1029,8 +1095,12 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) {
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-            // Adres çubuğunda Enter tuşuna (`VK_RETURN`) basıldıysa "Git ->" butonunu tetikle!
-            if msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN {
+            // Adres çubuğunda Enter tuşuna (`VK_RETURN`) basıldıysa (odaklı sayfa `<input>` yoksa) "Git ->" butonunu tetikle!
+            let input_focused = DURUM
+                .lock()
+                .ok()
+                .is_some_and(|g| g.as_ref().is_some_and(|s| s.state.focused_input().is_some()));
+            if !input_focused && msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN {
                 SendMessageW(hwnd, WM_COMMAND, ID_BTN_GO, 0);
                 continue;
             }

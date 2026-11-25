@@ -56,6 +56,11 @@ pub struct LayoutBox {
 
     // Eğer bu kutuda JavaScript tıklama olayı (`onclick="..."`) varsa çalıştırılacak JS kodu
     pub onclick: Option<String>,
+
+    // HTML `<form action="...">` içindeki metin kutusu (`<input name="...">`) ve gönderme (`submit`) bilgileri:
+    pub input_name: Option<String>,
+    pub form_action: Option<String>,
+    pub is_submit: bool,
 }
 
 /// Bir HTML düğümüne uygulanmış CSS özelliklerinin çözümlenmiş paketi:
@@ -97,6 +102,7 @@ struct NodeContext {
     inline_declarations: Vec<Declaration>,
     href: Option<String>,
     onclick: Option<String>,
+    form_action: Option<String>,
     text_align: Option<String>,
     /// Üst kapsayıcı (örn: `.kart` veya `#duyuru`) zaten arka plan/çerçeve çizdiyse çocuk metinler tekrar çerçeve çizmez!
     container_painted_bg: bool,
@@ -332,6 +338,9 @@ fn layout_node(
                     href: None,
                     image_src: None,
                     onclick: None,
+                    input_name: None,
+                    form_action: None,
+                    is_submit: false,
                 });
                 *current_y += 18;
                 return;
@@ -385,9 +394,102 @@ fn layout_node(
                     href: ctx.href.clone(),
                     image_src: if src.is_empty() { None } else { Some(src) },
                     onclick: ctx.onclick.clone(),
+                    input_name: None,
+                    form_action: None,
+                    is_submit: false,
                 });
 
                 *current_y += img_h + 14;
+                return;
+            }
+
+            // `<input type="text|search|submit" name="q" placeholder="..." value="...">` etiketi:
+            if tag_name == "input" {
+                let input_type = node
+                    .get_attribute("type")
+                    .unwrap_or("text")
+                    .trim()
+                    .to_lowercase();
+                if input_type == "hidden" {
+                    return;
+                }
+
+                let is_submit = input_type == "submit" || input_type == "button";
+                let value_attr = node.get_attribute("value").unwrap_or("").trim();
+                let placeholder = node.get_attribute("placeholder").unwrap_or("").trim();
+                let input_name = node
+                    .get_attribute("name")
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| Some("q".to_string()));
+
+                let display_text = if !value_attr.is_empty() {
+                    value_attr.to_string()
+                } else if is_submit {
+                    "Gonder".to_string()
+                } else if !placeholder.is_empty() {
+                    placeholder.to_string()
+                } else {
+                    "Aramak icin tiklayip yazin...".to_string()
+                };
+
+                let box_h = 30u32;
+                let box_w = if is_submit {
+                    ((display_text.chars().count() as u32) * 10 + 28).clamp(72, 220)
+                } else {
+                    (avail_width.saturating_sub(110)).clamp(160, 380)
+                };
+
+                if *inline_x + box_w > base_x + avail_width && *inline_x > base_x {
+                    *current_y += (*last_inline_height).max(box_h) + 10;
+                    *inline_x = base_x;
+                }
+
+                boxes.push(LayoutBox {
+                    tag: if is_submit {
+                        "button".to_string()
+                    } else {
+                        "input".to_string()
+                    },
+                    text: display_text,
+                    x: *inline_x,
+                    y: *current_y,
+                    width: box_w,
+                    height: box_h,
+                    color: if is_submit {
+                        "#ffffff".to_string()
+                    } else if value_attr.is_empty() {
+                        "#64748b".to_string()
+                    } else {
+                        "#0f172a".to_string()
+                    },
+                    bg_color: Some(if is_submit {
+                        "#2563eb".to_string()
+                    } else {
+                        "#ffffff".to_string()
+                    }),
+                    border_color: Some(if is_submit {
+                        "#1d4ed8".to_string()
+                    } else {
+                        "#94a3b8".to_string()
+                    }),
+                    font_size: 15,
+                    padding: 4,
+                    text_align: if is_submit {
+                        "center".to_string()
+                    } else {
+                        "left".to_string()
+                    },
+                    href: None,
+                    image_src: None,
+                    onclick: node.get_attribute("onclick").map(str::to_string),
+                    input_name: if is_submit { None } else { input_name },
+                    form_action: ctx.form_action.clone(),
+                    is_submit,
+                });
+
+                *inline_x += box_w + 10;
+                *last_inline_height = (*last_inline_height).max(box_h);
                 return;
             }
 
@@ -426,6 +528,10 @@ fn layout_node(
             }
             if let Some(onclick_val) = node.get_attribute("onclick") {
                 next_ctx.onclick = Some(onclick_val.to_string());
+            }
+            if tag_name == "form" {
+                let action = node.get_attribute("action").unwrap_or("").trim().to_string();
+                next_ctx.form_action = Some(action);
             }
             if own_style.text_align != "left" {
                 next_ctx.text_align = Some(own_style.text_align.clone());
@@ -515,6 +621,9 @@ fn layout_node(
                     href: None,
                     image_src: None,
                     onclick: None,
+                    input_name: None,
+                    form_action: None,
+                    is_submit: false,
                 });
 
                 next_ctx.container_painted_bg = true;
@@ -634,6 +743,15 @@ fn layout_node(
                     href: ctx.href.clone(),
                     image_src: None,
                     onclick: ctx.onclick.clone(),
+                    input_name: None,
+                    form_action: if current_tag == "button" {
+                        ctx.form_action.clone()
+                    } else {
+                        None
+                    },
+                    is_submit: current_tag == "button"
+                        && ctx.form_action.is_some()
+                        && ctx.onclick.is_none(),
                 });
 
                 *inline_x += item_w + 12;
@@ -689,6 +807,9 @@ fn layout_node(
                     href: None,
                     image_src: None,
                     onclick: None,
+                    input_name: None,
+                    form_action: None,
+                    is_submit: false,
                 });
                 *current_y += pad;
             }
@@ -728,6 +849,9 @@ fn layout_node(
                     href: ctx.href.clone(),
                     image_src: None,
                     onclick: ctx.onclick.clone(),
+                    input_name: None,
+                    form_action: None,
+                    is_submit: false,
                 });
 
                 if idx + 1 < line_count {
@@ -839,5 +963,27 @@ mod tests {
         assert!(kartlar[1].x > kartlar[0].x + kartlar[0].width);
         assert_eq!(kartlar[0].padding, 10);
         assert_eq!(kartlar[0].text_align, "center");
+    }
+
+    #[test]
+    fn test_form_ve_input_yerlesimi() {
+        let html = "<body><form action=\"https://tr.wikipedia.org/w/index.php\"><input type=\"text\" name=\"search\" placeholder=\"Vikipedi ara\"><input type=\"submit\" value=\"Ara\"></form></body>";
+        let dom = parse_html(html);
+        let kutular = compute_layout(&dom, &[], 800);
+
+        assert_eq!(kutular.len(), 2);
+        assert_eq!(kutular[0].tag, "input");
+        assert_eq!(kutular[0].input_name.as_deref(), Some("search"));
+        assert_eq!(
+            kutular[0].form_action.as_deref(),
+            Some("https://tr.wikipedia.org/w/index.php")
+        );
+        assert!(!kutular[0].is_submit);
+
+        assert_eq!(kutular[1].tag, "button");
+        assert!(kutular[1].is_submit);
+        // Metin kutusu ile Gönder butonu aynı satırda yan yana olmalı!
+        assert_eq!(kutular[0].y, kutular[1].y);
+        assert!(kutular[1].x > kutular[0].x);
     }
 }

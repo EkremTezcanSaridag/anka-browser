@@ -74,9 +74,9 @@ Anka'nın çekirdek motoru bir web sayfasını aşağıdaki boru hattı (pipelin
   - [x] Rust Cargo çalışma alanı (Workspace) kurulumu
   - [x] CI/CD (GitHub Actions), `CONTRIBUTING.md` ve açık kaynak lisansının (`MPL-2.0`) eklenmesi
 - [x] **Faz 1 — `anka-url` ve `anka-net` (Temel Ağ Katmanı)**
-  - [x] WHATWG uyumlu URL ayrıştırıcı, varsayılan port çözümleyici ve birim testleri (`crates/anka-url`)
+  - [x] WHATWG uyumlu URL ayrıştırıcı, varsayılan port çözümleyici, `file://` protokolü ve birim testleri (`crates/anka-url`)
   - [x] HTTP/1.1 TCP istemcisi (`GET`, Headers, yanıt ayrıştırıcı) ve birim testleri (`crates/anka-net`)
-  - [ ] İleri ağ özellikleri (TLS/HTTPS, Yönlendirme takibi, Chunked Transfer, Gzip)
+  - [x] İleri ağ özellikleri (Windows WinHTTP + Linux `dlopen` OpenSSL TLS/HTTPS, Yönlendirme takibi, Chunked Transfer, Saf Rust `Gzip/Deflate` açıcı)
 - [x] **Faz 2 — `anka-html` ve `anka-css` (Ayrıştırma Katmanı)**
   - [x] HTML5 Tokenizer ve hata toleranslı DOM ağacı oluşturucu (`crates/anka-html`)
   - [x] CSS kural ayrıştırıcı ve stil bildirimleri (`crates/anka-css`)

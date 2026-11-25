@@ -32,10 +32,16 @@ const GTK_WINDOW_TOPLEVEL: c_int = 0;
 const GTK_ORIENTATION_HORIZONTAL: c_int = 0;
 const GTK_ORIENTATION_VERTICAL: c_int = 1;
 
-// GDK Fare ve Kaydırma Olay Maskeleri:
+// GDK Fare, Klavye ve Kaydırma Olay Maskeleri:
 const GDK_BUTTON_PRESS_MASK: c_int = 1 << 8;
+const GDK_KEY_PRESS_MASK: c_int = 1 << 10;
 const GDK_SCROLL_MASK: c_int = 1 << 21;
 const GDK_SMOOTH_SCROLL_MASK: c_int = 1 << 23;
+
+// GDK Özel Tuş Kodları (`gdkkeysyms.h`):
+const GDK_KEY_BACKSPACE: u32 = 0xff08;
+const GDK_KEY_RETURN: u32 = 0xff0d;
+const GDK_KEY_KP_ENTER: u32 = 0xff8d;
 
 // GDK Kaydırma Yönleri:
 const GDK_SCROLL_UP: c_int = 0;
@@ -83,11 +89,15 @@ struct GtkCairoApi {
     gtk_widget_show: unsafe extern "C" fn(*mut GtkWidget),
     gtk_widget_hide: unsafe extern "C" fn(*mut GtkWidget),
     gtk_widget_show_all: unsafe extern "C" fn(*mut GtkWidget),
+    gtk_widget_set_can_focus: unsafe extern "C" fn(*mut GtkWidget, c_int),
+    gtk_widget_grab_focus: unsafe extern "C" fn(*mut GtkWidget),
 
     gdk_event_get_coords: unsafe extern "C" fn(*const GdkEvent, *mut c_double, *mut c_double) -> c_int,
     gdk_event_get_scroll_direction: unsafe extern "C" fn(*const GdkEvent, *mut c_int) -> c_int,
     gdk_event_get_scroll_deltas:
         unsafe extern "C" fn(*const GdkEvent, *mut c_double, *mut c_double) -> c_int,
+    gdk_event_get_keyval: unsafe extern "C" fn(*const GdkEvent, *mut u32) -> c_int,
+    gdk_keyval_to_unicode: unsafe extern "C" fn(u32) -> u32,
 
     g_signal_connect_data: unsafe extern "C" fn(
         *mut c_void,
@@ -183,10 +193,14 @@ fn gtk_api() -> Option<&'static GtkCairoApi> {
                 gtk_widget_show: load_sym(gtk, c"gtk_widget_show")?,
                 gtk_widget_hide: load_sym(gtk, c"gtk_widget_hide")?,
                 gtk_widget_show_all: load_sym(gtk, c"gtk_widget_show_all")?,
+                gtk_widget_set_can_focus: load_sym(gtk, c"gtk_widget_set_can_focus")?,
+                gtk_widget_grab_focus: load_sym(gtk, c"gtk_widget_grab_focus")?,
 
                 gdk_event_get_coords: load_sym(gdk, c"gdk_event_get_coords")?,
                 gdk_event_get_scroll_direction: load_sym(gdk, c"gdk_event_get_scroll_direction")?,
                 gdk_event_get_scroll_deltas: load_sym(gdk, c"gdk_event_get_scroll_deltas")?,
+                gdk_event_get_keyval: load_sym(gdk, c"gdk_event_get_keyval")?,
+                gdk_keyval_to_unicode: load_sym(gdk, c"gdk_keyval_to_unicode")?,
 
                 g_signal_connect_data: load_sym(gobj, c"g_signal_connect_data")?,
 
@@ -432,7 +446,7 @@ unsafe extern "C" fn on_example_clicked(_widget: *mut GtkWidget, _data: *mut c_v
 }
 
 unsafe extern "C" fn on_canvas_button_press(
-    _widget: *mut GtkWidget,
+    widget: *mut GtkWidget,
     event: *const GdkEvent,
     _data: *mut c_void,
 ) -> c_int {
@@ -448,7 +462,12 @@ unsafe extern "C" fn on_canvas_button_press(
         && let Some(app) = guard.as_mut()
     {
         let act = app.state.click_at(x as i32, y as i32);
-        if act == ClickAction::JsUpdated {
+        if app.state.focused_input().is_some() {
+            unsafe {
+                (api.gtk_widget_grab_focus)(widget);
+            }
+        }
+        if act == ClickAction::Redraw {
             arayuzu_guncelle(api, app);
         }
         act
@@ -461,6 +480,53 @@ unsafe extern "C" fn on_canvas_button_press(
     }
 
     0
+}
+
+/// Tuval üzerindeki odaklı bir HTML `<input>` kutusuna klavyeden harf yazıldığında,
+/// `Backspace` ile silindiğinde veya `Enter` ile form gönderildiğinde çalışır!
+unsafe extern "C" fn on_canvas_key_press(
+    widget: *mut GtkWidget,
+    event: *const GdkEvent,
+    _data: *mut c_void,
+) -> c_int {
+    let Some(api) = gtk_api() else { return 0 };
+    let mut keyval: u32 = 0;
+    if unsafe { (api.gdk_event_get_keyval)(event, &mut keyval) } == 0 {
+        return 0;
+    }
+
+    let mut submit_url: Option<String> = None;
+    let mut handled = false;
+
+    if let Ok(mut guard) = LINUX_APP.lock()
+        && let Some(app) = guard.as_mut()
+        && app.state.focused_input().is_some()
+    {
+        if keyval == GDK_KEY_BACKSPACE {
+            handled = app.state.backspace_input();
+        } else if keyval == GDK_KEY_RETURN || keyval == GDK_KEY_KP_ENTER {
+            submit_url = app.state.submit_focused_form();
+            handled = true;
+        } else {
+            let uni = unsafe { (api.gdk_keyval_to_unicode)(keyval) };
+            if let Some(ch) = char::from_u32(uni)
+                && !ch.is_control()
+            {
+                handled = app.state.type_char(ch);
+            }
+        }
+        if handled {
+            unsafe {
+                (api.gtk_widget_queue_draw)(widget);
+            }
+        }
+    }
+
+    if let Some(url) = submit_url {
+        adres_yukle(&url, true);
+    }
+
+    if handled { 1 } else { 0 }
 }
 
 unsafe extern "C" fn on_canvas_scroll(
@@ -585,8 +651,15 @@ unsafe extern "C" fn on_canvas_draw(
                     }
                 }
 
-                // 3. Kutu çerçevesi (`border`)
-                if let Some(border) = &komut.border_color {
+                // 3. Kutu çerçevesi (`border`) — Odaklı `<input>` ise canlı mavi çerçeve çiz!
+                let is_focused_input = komut.input_name.is_some()
+                    && app.state.focused_input() == komut.input_name.as_deref();
+                if is_focused_input {
+                    (api.cairo_set_source_rgb)(cr, 37.0 / 255.0, 99.0 / 255.0, 235.0 / 255.0);
+                    (api.cairo_set_line_width)(cr, 2.0);
+                    (api.cairo_rectangle)(cr, draw_x - 4.0, draw_y - 2.0, box_w, box_h);
+                    (api.cairo_stroke)(cr);
+                } else if let Some(border) = &komut.border_color {
                     (api.cairo_set_source_rgb)(
                         cr,
                         border.r as c_double / 255.0,
@@ -598,8 +671,32 @@ unsafe extern "C" fn on_canvas_draw(
                     (api.cairo_stroke)(cr);
                 }
 
-                // 4. Metin ve link alt çizgisi (`text-align` ve `padding` destekli!)
-                if !gorsel_cizildi && !komut.text.is_empty() {
+                // 4. Metin ve link alt çizgisi (`<input>` ise kullanıcının yazdığı canlı değeri göster!)
+                let mut live_text_color = komut.color;
+                let render_text: String = if let Some(input_name) = &komut.input_name {
+                    if let Some(typed) = app.state.input_value(input_name)
+                        && !typed.is_empty()
+                    {
+                        live_text_color = anka_paint::RgbColor {
+                            r: 15,
+                            g: 23,
+                            b: 42,
+                        };
+                        if is_focused_input {
+                            format!("{typed}|")
+                        } else {
+                            typed.to_string()
+                        }
+                    } else if is_focused_input {
+                        "|".to_string()
+                    } else {
+                        komut.text.clone()
+                    }
+                } else {
+                    komut.text.clone()
+                };
+
+                if !gorsel_cizildi && !render_text.is_empty() {
                     let weight = if matches!(komut.tag.as_str(), "h1" | "h2" | "h3") {
                         CAIRO_FONT_WEIGHT_BOLD
                     } else {
@@ -616,13 +713,13 @@ unsafe extern "C" fn on_canvas_draw(
 
                     (api.cairo_set_source_rgb)(
                         cr,
-                        komut.color.r as c_double / 255.0,
-                        komut.color.g as c_double / 255.0,
-                        komut.color.b as c_double / 255.0,
+                        live_text_color.r as c_double / 255.0,
+                        live_text_color.g as c_double / 255.0,
+                        live_text_color.b as c_double / 255.0,
                     );
 
                     let pad = komut.padding as c_double;
-                    let approx_text_w = ((komut.text.chars().count() as c_double)
+                    let approx_text_w = ((render_text.chars().count() as c_double)
                         * (komut.font_size as c_double * 0.56))
                         .min(box_w - pad * 2.0)
                         .max(0.0);
@@ -636,7 +733,7 @@ unsafe extern "C" fn on_canvas_draw(
                     let baseline_y = draw_y + pad + (komut.font_size as c_double);
                     (api.cairo_move_to)(cr, text_x, baseline_y);
 
-                    let c_text = to_cstr(&komut.text);
+                    let c_text = to_cstr(&render_text);
                     (api.cairo_show_text)(cr, c_text.as_ptr());
 
                     if komut.tag == "a" {
@@ -763,9 +860,10 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) -> bool {
 
         // ORTA WEB TUVALİ
         let canvas = (api.gtk_drawing_area_new)();
+        (api.gtk_widget_set_can_focus)(canvas, 1);
         (api.gtk_widget_add_events)(
             canvas,
-            GDK_BUTTON_PRESS_MASK | GDK_SCROLL_MASK | GDK_SMOOTH_SCROLL_MASK,
+            GDK_BUTTON_PRESS_MASK | GDK_KEY_PRESS_MASK | GDK_SCROLL_MASK | GDK_SMOOTH_SCROLL_MASK,
         );
         (api.gtk_box_pack_start)(vbox as *mut GtkBox, canvas, 1, 1, 0);
 
@@ -775,6 +873,12 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) -> bool {
             canvas,
             "button-press-event",
             on_canvas_button_press as GCallback,
+        );
+        connect_signal(
+            api,
+            canvas,
+            "key-press-event",
+            on_canvas_key_press as GCallback,
         );
         connect_signal(api, canvas, "scroll-event", on_canvas_scroll as GCallback);
 

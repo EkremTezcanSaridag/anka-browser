@@ -9,7 +9,7 @@ Bu doküman, geliştirme ortamı **Windows'tan Milis Linux'a** taşınırken Ant
 - **Motor Adı:** Telek Engine (*Anka kuşunun uçmasını sağlayan ana kanat tüyü*)
 - **GitHub Deposu:** `https://github.com/EkremTezcanSaridag/anka-browser`
 - **Dil & Yapı:** Rust (`edition = "2024"`, Cargo Workspace / Monorepo, Lisans: `MPL-2.0`)
-- **Mevcut Son Sürüm:** `v0.2.7` (35/35 birim testi başarılı, sıfır `clippy` uyarısı, sıfır üçüncü parti crate ve sıfır Linux `-dev` paketi bağımlılığı)
+- **Mevcut Son Sürüm:** `v0.2.8` (38/38 birim testi başarılı, sıfır `clippy` uyarısı, sıfır üçüncü parti crate ve sıfır Linux `-dev` paketi bağımlılığı)
 - **Temel Felsefe:** Hazır bir Chromium/WebKit/Gecko fork'u veya WebView kabuğu **değildir**. URL ayrıştırmadan ağ katmanına, HTML/DOM ağacından CSS, Layout ve Paint aşamasına kadar tüm boru hattı (pipeline) sıfırdan, eğitici ve anlaşılır Türkçe yorum satırlarıyla yazılmaktadır.
 
 ---
@@ -32,7 +32,7 @@ Bu doküman, geliştirme ortamı **Windows'tan Milis Linux'a** taşınırken Ant
 | Modül | Mevcut Yetenekler (`v0.2.2` İtibarıyla) | Test Sayısı |
 | :--- | :--- | :---: |
 | **`crates/anka-url`** | `Url::parse` (scheme, host, port, path, query, fragment), `effective_port` (`http -> 80`, `https -> 443`), `Url::resolve` (bağıl URL çözümleme). | 4 ✅ |
-| **`crates/anka-net`** | `HTTP/1.1` TCP istemcisi (`fetch`), ham ikili bayt (`raw_body: Vec<u8>`) ve `parse_http_response_bytes`, `301/302/303/307/308` otomatik yönlendirme takibi (`MAX_REDIRECTS = 5`), bayt düzeyinde `Transfer-Encoding: chunked` birleştirici (`decode_chunked_bytes`), büyük/küçük harf duyarsız `get_header`. Windows'ta `winhttp_tls.rs`, tüm Linux dağıtımlarında `linux_tls.rs` (OpenSSL FFI) ile sıfır bağımlılıklı `HTTPS/TLS 1.3`. | 5 ✅ |
+| **`crates/anka-net`** | `HTTP/1.1` TCP istemcisi (`fetch`), yerel `file://` protokolü, ham ikili bayt (`raw_body: Vec<u8>`), saf Rust `GZIP / DEFLATE` açıcısı (`gzip.rs`), `301/302/303/307/308` yönlendirme takibi, bayt düzeyinde `chunked` birleştirici. Windows'ta `winhttp_tls.rs`, tüm Linux'larda `dlopen` `linux_tls.rs` ile `HTTPS/TLS 1.3`. | 6 ✅ |
 | **`crates/anka-html`** | Hata toleranslı (kapanmamış etiketlerde çökmeyen) HTML5 Tokenizer ve DOM ağacı (`DomNode`), etiket özellikleri (`attributes`), `extract_title` (`<title>`), `extract_styles` (`<style>`), `extract_stylesheet_links` (`<link rel="stylesheet">`), `decode_html_entities` (`&amp;`, `&nbsp;` vb.). | 6 ✅ |
 | **`crates/anka-css`** | `parse_css`: Seçici (`selector`) ve özellik (`Declaration`: `property`, `value`) ayrıştırıcı. | 2 ✅ |
 | **`crates/anka-layout`** | `compute_layout`: DOM + CSS birleştirme, `selector_matches` (`tag`, `.class`, `#id`, `tag.class`), satır içi `style="..."`, otomatik satır kaydırma (`wrap_text`), `<li>` madde işareti (`• `), `<hr>` yatay çizgi, `<img src alt width height>` görsel kutu yerleşimi (`image_src`), kısa `<a>`/`<span>`/`<button>` öğelerinin yan yana (`inline`) dizilimi, `bg_color` ve `border_color`. | 4 ✅ |
