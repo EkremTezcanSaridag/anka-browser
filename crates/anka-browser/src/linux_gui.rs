@@ -10,7 +10,7 @@ use std::ffi::{CStr, CString, c_char, c_double, c_int, c_ulong, c_void};
 use std::ptr::{null, null_mut};
 use std::sync::{Mutex, OnceLock};
 
-use crate::browser_state::BrowserState;
+use crate::browser_state::{BrowserState, ClickAction};
 
 // GTK / GDK / Cairo opak C işaretçi tipleri:
 type GtkWidget = c_void;
@@ -444,15 +444,19 @@ unsafe extern "C" fn on_canvas_button_press(
         return 0;
     }
 
-    let hedef_link = if let Ok(guard) = LINUX_APP.lock()
-        && let Some(app) = guard.as_ref()
+    let action = if let Ok(mut guard) = LINUX_APP.lock()
+        && let Some(app) = guard.as_mut()
     {
-        app.state.link_at(x as i32, y as i32)
+        let act = app.state.click_at(x as i32, y as i32);
+        if act == ClickAction::JsUpdated {
+            arayuzu_guncelle(api, app);
+        }
+        act
     } else {
-        None
+        ClickAction::None
     };
 
-    if let Some(yeni_url) = hedef_link {
+    if let ClickAction::Navigate(yeni_url) = action {
         adres_yukle(&yeni_url, true);
     }
 

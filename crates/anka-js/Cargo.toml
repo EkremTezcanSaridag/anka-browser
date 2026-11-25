@@ -1,0 +1,10 @@
+# anka-js (İstasyon 7: Sıfırdan JavaScript Çalışma Zamanı ve Canlı DOM API)
+[package]
+name = "anka-js"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anka-html = { path = "../anka-html" }

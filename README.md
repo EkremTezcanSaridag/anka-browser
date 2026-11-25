@@ -90,7 +90,7 @@ Anka'nın çekirdek motoru bir web sayfasını aşağıdaki boru hattı (pipelin
   - [x] `<img src="..." alt="...">` görsel kutu yerleşimi, saf Rust BMP/PPM + Linux `dlopen` `gdk-pixbuf` PNG/JPEG/WebP piksel çözümü ve Cairo/GDI çizimi
   - [x] Yerel dosya protokolü (`file://`), CSS Kutu Modeli (`padding`, `margin`, `text-align`), birleşik kart çerçeveleri ve CSS Flexbox (`display: flex`, `gap`)
 - [ ] **Faz 5 — JavaScript, Süreç İzolasyonu ve Güvenlik**
-  - [ ] JavaScript motoru ve DOM API entegrasyonu
+  - [x] Sıfırdan JavaScript motoru (`crates/anka-js`), canlı DOM API (`document.getElementById(...).innerText`, `style.*`, `document.title`) ve `<button onclick="...">` etkileşimi
   - [ ] Çok süreçli (Multi-process) sekme izolasyonu ve yerleşik izleyici/reklam engelleyici
 
 ---

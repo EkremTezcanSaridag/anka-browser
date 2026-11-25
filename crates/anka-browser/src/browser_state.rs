@@ -1,31 +1,35 @@
 // Anka Browser - İşletim Sisteminden Bağımsız Ortak Tarayıcı Durumu (BrowserState)
-// Çoklu Sekme (Multi-Tab) ve Yer İmleri (Bookmarks) Yöneticisi (v0.2.4)
-// Hem Windows (Win32 GDI) hem de tüm Linux dağıtımları (GTK3 + Cairo)
-// sekmeleri, gezinme geçmişini (Geri / İleri), kaydırma konumunu (scroll_y),
-// yer imlerini ve link tıklama (hit-test) hesaplamalarını bu ortak modül üzerinden yürütür.
+// Çoklu Sekme (Multi-Tab), Yer İmleri (Bookmarks) ve Canlı JavaScript `onclick` Etkileşimi (v0.2.7)
 
 use anka_paint::PaintCommand;
 use anka_url::Url;
 
-use crate::{html_motoru_calistir, motoru_calistir, normalize_address};
+use crate::{LoadedPage, html_motoru_calistir, motoru_calistir, normalize_address};
 
-/// Tek bir tarayıcı sekmesinin (Tab) bağımsız durumunu tutan veri yapısı:
+/// Kullanıcının web sayfası tuvaline tıkladığında tetiklenebilecek eylem türleri:
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClickAction {
+    /// Bir `<a href="...">` linkine tıklandı -> yeni adrese git!
+    Navigate(String),
+    /// Bir `<button onclick="...">` butonuna tıklandı -> JavaScript canlı çalıştı ve ekran yeniden çizilmeli!
+    JsUpdated,
+    /// Boş bir yere tıklandı
+    None,
+}
+
+/// Tek bir tarayıcı sekmesinin (Tab) bağımsız canlı durumunu tutan veri yapısı:
 #[derive(Clone)]
 pub struct TabState {
     /// Bu sekmede açık olan sayfanın tam adresi
     pub current_url: String,
-    /// Sekmedeki sayfanın `<title>` etiketinden okunan başlığı
-    pub page_title: Option<String>,
+    /// Bu sekmenin canlı DOM, CSS, Görsel Önbellek ve JavaScript Runtime paketi
+    pub page: LoadedPage,
     /// Bu sekmenin kendi Geri (`<-`) geçmişi yığını
     pub history: Vec<String>,
     /// Bu sekmenin kendi İleri (`->`) geçmişi yığını
     pub forward_history: Vec<String>,
     /// Bu sekmenin dikey kaydırma miktarı (piksel)
     pub scroll_y: i32,
-    /// Alt durum çubuğunda gösterilecek özet bilgi
-    pub status_message: String,
-    /// Bu sekmeye ait `anka-paint` çizim komutları listesi
-    pub display_list: Vec<PaintCommand>,
 }
 
 /// Kullanıcının kaydettiği tek bir Yer İmi (Bookmark) kaydı:
@@ -66,23 +70,21 @@ impl BrowserState {
             },
         ];
 
-        let mut state = Self {
+        let ilk_sayfa = motoru_calistir(initial_address, viewport_width);
+        let temiz_url = normalize_address(initial_address);
+
+        Self {
             tabs: vec![TabState {
-                current_url: String::new(),
-                page_title: None,
+                current_url: temiz_url,
+                page: ilk_sayfa,
                 history: Vec::new(),
                 forward_history: Vec::new(),
                 scroll_y: 0,
-                status_message: String::new(),
-                display_list: Vec::new(),
             }],
             active_tab: 0,
             bookmarks: varsayilan_yer_imleri,
             viewport_width,
-        };
-
-        state.navigate(initial_address, false);
-        state
+        }
     }
 
     /// Şu an aktif olan sekmenin (`TabState`) salt-okunur referansını döndürür.
@@ -117,21 +119,21 @@ impl BrowserState {
             self.active_tab + 1,
             self.tabs.len(),
             yildiz,
-            self.active().status_message
+            self.active().page.status_message
         )
     }
 
     /// Aktif sekmenin çizim listesini döndürür.
     pub fn display_list(&self) -> &[PaintCommand] {
-        &self.active().display_list
+        &self.active().page.display_list
     }
 
     /// Pencere başlığında gösterilecek metni üretir.
     pub fn window_title(&self) -> String {
         let tab_info = format!("[Sekme {}/{}]", self.active_tab + 1, self.tabs.len());
-        match &self.active().page_title {
-            Some(t) => format!("{t} {tab_info} — Anka Browser v0.2.6"),
-            None => format!("Anka Browser v0.2.6 {tab_info} — Telek Engine"),
+        match &self.active().page.page_title {
+            Some(t) => format!("{t} {tab_info} — Anka Browser v0.2.7"),
+            None => format!("Anka Browser v0.2.7 {tab_info} — Telek Engine"),
         }
     }
 
@@ -141,6 +143,7 @@ impl BrowserState {
             return format!("Sekme {}", index + 1);
         };
         let ham_baslik = tab
+            .page
             .page_title
             .as_deref()
             .unwrap_or(tab.current_url.as_str());
@@ -153,19 +156,16 @@ impl BrowserState {
     }
 
     /// Yeni bir sekme (`+ Sekme`) açar, o sekmeyi aktif yapar ve verilen adresi yükler.
-    /// Açılan yeni sekmenin indeksini döndürür.
     pub fn new_tab(&mut self, initial_address: &str) -> usize {
+        let sayfa = motoru_calistir(initial_address, self.viewport_width);
         self.tabs.push(TabState {
-            current_url: String::new(),
-            page_title: None,
+            current_url: normalize_address(initial_address),
+            page: sayfa,
             history: Vec::new(),
             forward_history: Vec::new(),
             scroll_y: 0,
-            status_message: String::new(),
-            display_list: Vec::new(),
         });
         self.active_tab = self.tabs.len() - 1;
-        self.navigate(initial_address, false);
         self.active_tab
     }
 
@@ -180,7 +180,6 @@ impl BrowserState {
     }
 
     /// Aktif sekmeyi kapatır (`x Kapat`).
-    /// Eğer açık olan tek bir sekme kaldıysa tarayıcı kapanmasın diye ana sayfaya döner.
     pub fn close_active_tab(&mut self) {
         if self.tabs.len() <= 1 {
             self.navigate("http://anka.local/hosgeldiniz", false);
@@ -198,8 +197,7 @@ impl BrowserState {
         self.bookmarks.iter().any(|b| b.url == current)
     }
 
-    /// Aktif sayfayı Yer İmlerine ekler veya zaten kayıtlıysa Yer İmlerinden çıkarır (`★ Yer İmi`).
-    /// Eklendiyse `true`, çıkarıldıysa `false` döner.
+    /// Aktif sayfayı Yer İmlerine ekler veya zaten kayıtlıysa Yer İmlerinden çıkarır.
     pub fn toggle_bookmark(&mut self) -> bool {
         let current = self.current_url().to_string();
         if current.is_empty() || current == "http://anka.local/yer-imleri" {
@@ -212,6 +210,7 @@ impl BrowserState {
         } else {
             let title = self
                 .active()
+                .page
                 .page_title
                 .clone()
                 .unwrap_or_else(|| current.clone());
@@ -250,8 +249,8 @@ impl BrowserState {
                 "h2 {{ color: #0f766e; font-size: 20px; }}",
                 "p  {{ color: #1e293b; font-size: 16px; }}",
                 ".pill {{ color: #1d4ed8; background-color: #dbeafe; border: 1px solid #60a5fa; font-size: 15px; }}",
-                ".kart {{ color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; font-size: 16px; }}",
-                "#duyuru {{ color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; font-size: 16px; }}",
+                ".kart {{ color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; padding: 8px; font-size: 16px; }}",
+                "#duyuru {{ color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; padding: 8px; font-size: 16px; }}",
                 "</style></head><body>",
                 "<h1>Anka Browser — Yer Imlerim ({} Kayit)</h1>",
                 "<nav>",
@@ -281,20 +280,17 @@ impl BrowserState {
         }
 
         let viewport_w = self.viewport_width;
-        let (page_title, status_message, display_list) =
-            if clean_url == "http://anka.local/yer-imleri" {
-                let raw_http = self.build_bookmarks_http_response();
-                html_motoru_calistir(&clean_url, &raw_http, viewport_w)
-            } else {
-                motoru_calistir(&clean_url, viewport_w)
-            };
+        let loaded = if clean_url == "http://anka.local/yer-imleri" {
+            let raw_http = self.build_bookmarks_http_response();
+            html_motoru_calistir(&clean_url, &raw_http, viewport_w)
+        } else {
+            motoru_calistir(&clean_url, viewport_w)
+        };
 
         let tab = self.active_mut();
         tab.current_url = clean_url;
-        tab.page_title = page_title;
+        tab.page = loaded;
         tab.scroll_y = 0;
-        tab.status_message = status_message;
-        tab.display_list = display_list;
     }
 
     /// Aktif sekmede Geri (`<-`) butonuna basıldığında bir önceki sayfaya döner.
@@ -335,41 +331,83 @@ impl BrowserState {
         tab.scroll_y = (tab.scroll_y + delta_y).max(0);
     }
 
-    /// Tuval (Canvas) üzerindeki `(canvas_x, canvas_y)` noktasında tıklanabilir bir `<a href="...">`
-    /// link kutusu olup olmadığını kontrol eder (Hit-Testing).
-    pub fn link_at(&self, canvas_x: i32, canvas_y: i32) -> Option<String> {
+    /// Tuval üzerindeki `(canvas_x, canvas_y)` koordinatında tıklanabilir bir link (`href`)
+    /// veya JavaScript butonu (`onclick`) olup olmadığını kontrol eder (İmleç değiştirme için).
+    #[allow(dead_code)]
+    pub fn is_interactive_at(&self, canvas_x: i32, canvas_y: i32) -> bool {
         let tab = self.active();
-        let base_url = Url::parse(&tab.current_url).ok()?;
-
-        for komut in &tab.display_list {
-            if let Some(href) = &komut.href {
+        tab.page.display_list.iter().any(|komut| {
+            if komut.href.is_some() || komut.onclick.is_some() {
                 let draw_x = komut.x as i32 + 4;
                 let draw_right = draw_x + komut.width as i32;
                 let draw_y = komut.y as i32 - tab.scroll_y;
                 let draw_bottom = draw_y + komut.height as i32;
-
-                if canvas_x >= draw_x
+                canvas_x >= draw_x
                     && canvas_x <= draw_right
                     && canvas_y >= draw_y
                     && canvas_y <= draw_bottom
-                    && let Ok(resolved) = base_url.resolve(href)
-                {
-                    let port_part = resolved
-                        .port
-                        .map(|p| format!(":{p}"))
-                        .unwrap_or_default();
-                    let query_part = resolved
-                        .query
-                        .map(|q| format!("?{q}"))
-                        .unwrap_or_default();
-                    return Some(format!(
-                        "{}://{}{}{}{}",
-                        resolved.scheme, resolved.host, port_part, resolved.path, query_part
-                    ));
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Tuval (Canvas) üzerindeki `(canvas_x, canvas_y)` noktasına tıklandığında:
+    /// 1. Eğer bir `<button onclick="...">` (veya `onclick` taşıyan öğe) varsa JavaScript kodunu
+    ///    canlı olarak `anka-js` üzerinden çalıştırır, DOM'u günceller ve `ClickAction::JsUpdated` döner!
+    /// 2. Eğer bir `<a href="...">` linki varsa tam adresi çözüp `ClickAction::Navigate(url)` döner!
+    pub fn click_at(&mut self, canvas_x: i32, canvas_y: i32) -> ClickAction {
+        let tab = self.active();
+        let mut found_onclick: Option<String> = None;
+        let mut found_href: Option<String> = None;
+
+        for komut in &tab.page.display_list {
+            let draw_x = komut.x as i32 + 4;
+            let draw_right = draw_x + komut.width as i32;
+            let draw_y = komut.y as i32 - tab.scroll_y;
+            let draw_bottom = draw_y + komut.height as i32;
+
+            if canvas_x >= draw_x
+                && canvas_x <= draw_right
+                && canvas_y >= draw_y
+                && canvas_y <= draw_bottom
+            {
+                if let Some(js_code) = &komut.onclick {
+                    found_onclick = Some(js_code.clone());
+                    break;
+                }
+                if let Some(href) = &komut.href {
+                    found_href = Some(href.clone());
+                    break;
                 }
             }
         }
-        None
+
+        if let Some(js_code) = found_onclick {
+            let vw = self.viewport_width;
+            self.active_mut().page.run_inline_js(&js_code, vw);
+            return ClickAction::JsUpdated;
+        }
+
+        if let Some(href) = found_href
+            && let Ok(base_url) = Url::parse(&self.active().current_url)
+            && let Ok(resolved) = base_url.resolve(&href)
+        {
+            let port_part = resolved
+                .port
+                .map(|p| format!(":{p}"))
+                .unwrap_or_default();
+            let query_part = resolved
+                .query
+                .map(|q| format!("?{q}"))
+                .unwrap_or_default();
+            return ClickAction::Navigate(format!(
+                "{}://{}{}{}{}",
+                resolved.scheme, resolved.host, port_part, resolved.path, query_part
+            ));
+        }
+
+        ClickAction::None
     }
 }
 
@@ -383,7 +421,6 @@ mod tests {
         assert_eq!(state.current_url(), "http://anka.local/sayfa1");
         assert!(state.active().history.is_empty());
 
-        // 2. sayfaya git
         state.navigate("http://anka.local/sayfa2", true);
         assert_eq!(state.current_url(), "http://anka.local/sayfa2");
         assert_eq!(
@@ -391,7 +428,6 @@ mod tests {
             vec!["http://anka.local/sayfa1".to_string()]
         );
 
-        // Geri (`<-`) gel
         assert!(state.go_back());
         assert_eq!(state.current_url(), "http://anka.local/sayfa1");
         assert_eq!(
@@ -399,28 +435,52 @@ mod tests {
             vec!["http://anka.local/sayfa2".to_string()]
         );
 
-        // İleri (`->`) git
         assert!(state.go_forward());
         assert_eq!(state.current_url(), "http://anka.local/sayfa2");
     }
 
     #[test]
-    fn test_link_tiklama_koordinat_yakalama() {
-        let state = BrowserState::new("http://anka.local/hosgeldiniz", 860);
+    fn test_link_ve_canli_js_button_onclick_tiklama() {
+        let mut state = BrowserState::new("http://anka.local/hosgeldiniz", 860);
+
+        // 1) `<script>` sayfa açılır açılmaz `js_sayac` yazısını JS ile değiştirmiş olmalı!
+        assert!(
+            state
+                .display_list()
+                .iter()
+                .any(|k| k.text.contains("Anka JS Hazir! Tiklama Sayisi: 0"))
+        );
+
+        // 2) `+1 Artir (JS)` butonunun koordinatını bulup tıkla!
+        let js_btn = state
+            .display_list()
+            .iter()
+            .find(|k| k.onclick.as_deref() == Some("artir()"))
+            .expect("Ana sayfada artir() JS butonu olmali")
+            .clone();
+
+        let action = state.click_at(js_btn.x as i32 + 10, js_btn.y as i32 + 5);
+        assert_eq!(action, ClickAction::JsUpdated);
+
+        // Tıklama sonrası DOM yeniden çizilmiş ve sayaç "1" olmuş olmalı!
+        assert!(
+            state
+                .display_list()
+                .iter()
+                .any(|k| k.text.contains("Tiklama Sayisi: 1"))
+        );
+
+        // 3) Bir linke tıklama testini doğrula:
         let ilk_link = state
             .display_list()
             .iter()
             .find(|k| k.href.as_deref() == Some("https://example.com"))
-            .expect("Ana sayfada example.com linki olmali");
-
-        let tiklama_x = ilk_link.x as i32 + 10;
-        let tiklama_y = ilk_link.y as i32 + 5;
-
+            .expect("Ana sayfada example.com linki olmali")
+            .clone();
         assert_eq!(
-            state.link_at(tiklama_x, tiklama_y),
-            Some("https://example.com/".to_string())
+            state.click_at(ilk_link.x as i32 + 10, ilk_link.y as i32 + 5),
+            ClickAction::Navigate("https://example.com/".to_string())
         );
-        assert_eq!(state.link_at(5, 5), None);
     }
 
     #[test]
@@ -429,17 +489,14 @@ mod tests {
         assert_eq!(state.tabs.len(), 1);
         assert_eq!(state.active_tab, 0);
 
-        // 2. sekmeyi aç
         let yeni_indeks = state.new_tab("http://anka.local/sekme2");
         assert_eq!(yeni_indeks, 1);
         assert_eq!(state.tabs.len(), 2);
         assert_eq!(state.current_url(), "http://anka.local/sekme2");
 
-        // 1. sekmeye geri geç; kendi URL'sini koruyor olmalı
         assert!(state.switch_tab(0));
         assert_eq!(state.current_url(), "http://anka.local/sekme1");
 
-        // 1. sekmeyi kapat; geriye 2. sekme kalmalı
         state.close_active_tab();
         assert_eq!(state.tabs.len(), 1);
         assert_eq!(state.current_url(), "http://anka.local/sekme2");
@@ -450,11 +507,9 @@ mod tests {
         let mut state = BrowserState::new("http://anka.local/ozel-makale", 860);
         assert!(!state.is_current_bookmarked());
 
-        // Yer imlerine ekle
         assert!(state.toggle_bookmark());
         assert!(state.is_current_bookmarked());
 
-        // Yer imleri sayfasına (`http://anka.local/yer-imleri`) git ve eklenen linkin çizildiğini doğrula
         state.navigate("http://anka.local/yer-imleri", true);
         assert!(
             state
@@ -463,7 +518,6 @@ mod tests {
                 .any(|k| k.href.as_deref() == Some("http://anka.local/ozel-makale"))
         );
 
-        // Geri dönüp yer imlerinden çıkar
         state.go_back();
         assert!(!state.toggle_bookmark());
         assert!(!state.is_current_bookmarked());

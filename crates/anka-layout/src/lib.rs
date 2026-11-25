@@ -53,6 +53,9 @@ pub struct LayoutBox {
 
     // Eğer bu kutu bir görsel (<img>) ise kaynak adresi (`src="..."`)
     pub image_src: Option<String>,
+
+    // Eğer bu kutuda JavaScript tıklama olayı (`onclick="..."`) varsa çalıştırılacak JS kodu
+    pub onclick: Option<String>,
 }
 
 /// Bir HTML düğümüne uygulanmış CSS özelliklerinin çözümlenmiş paketi:
@@ -93,6 +96,7 @@ struct NodeContext {
     classes: Vec<String>,
     inline_declarations: Vec<Declaration>,
     href: Option<String>,
+    onclick: Option<String>,
     text_align: Option<String>,
     /// Üst kapsayıcı (örn: `.kart` veya `#duyuru`) zaten arka plan/çerçeve çizdiyse çocuk metinler tekrar çerçeve çizmez!
     container_painted_bg: bool,
@@ -327,6 +331,7 @@ fn layout_node(
                     text_align: "left".to_string(),
                     href: None,
                     image_src: None,
+                    onclick: None,
                 });
                 *current_y += 18;
                 return;
@@ -379,6 +384,7 @@ fn layout_node(
                     text_align: "left".to_string(),
                     href: ctx.href.clone(),
                     image_src: if src.is_empty() { None } else { Some(src) },
+                    onclick: ctx.onclick.clone(),
                 });
 
                 *current_y += img_h + 14;
@@ -417,6 +423,9 @@ fn layout_node(
             next_ctx.inline_declarations.extend(own_inline);
             if let Some(href_val) = node.get_attribute("href") {
                 next_ctx.href = Some(href_val.to_string());
+            }
+            if let Some(onclick_val) = node.get_attribute("onclick") {
+                next_ctx.onclick = Some(onclick_val.to_string());
             }
             if own_style.text_align != "left" {
                 next_ctx.text_align = Some(own_style.text_align.clone());
@@ -505,6 +514,7 @@ fn layout_node(
                     text_align: own_style.text_align.clone(),
                     href: None,
                     image_src: None,
+                    onclick: None,
                 });
 
                 next_ctx.container_painted_bg = true;
@@ -623,6 +633,7 @@ fn layout_node(
                     text_align: style.text_align,
                     href: ctx.href.clone(),
                     image_src: None,
+                    onclick: ctx.onclick.clone(),
                 });
 
                 *inline_x += item_w + 12;
@@ -677,6 +688,7 @@ fn layout_node(
                     text_align: style.text_align.clone(),
                     href: None,
                     image_src: None,
+                    onclick: None,
                 });
                 *current_y += pad;
             }
@@ -715,6 +727,7 @@ fn layout_node(
                     text_align: style.text_align.clone(),
                     href: ctx.href.clone(),
                     image_src: None,
+                    onclick: ctx.onclick.clone(),
                 });
 
                 if idx + 1 < line_count {
