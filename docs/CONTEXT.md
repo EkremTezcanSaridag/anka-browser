@@ -9,7 +9,7 @@ Bu doküman, geliştirme ortamı **Windows'tan Milis Linux'a** taşınırken Ant
 - **Motor Adı:** Telek Engine (*Anka kuşunun uçmasını sağlayan ana kanat tüyü*)
 - **GitHub Deposu:** `https://github.com/EkremTezcanSaridag/anka-browser`
 - **Dil & Yapı:** Rust (`edition = "2024"`, Cargo Workspace / Monorepo, Lisans: `MPL-2.0`)
-- **Mevcut Son Sürüm:** `v0.2.6` (31/31 birim testi başarılı, sıfır `clippy` uyarısı, sıfır üçüncü parti crate ve sıfır Linux `-dev` paketi bağımlılığı)
+- **Mevcut Son Sürüm:** `v0.2.7` (35/35 birim testi başarılı, sıfır `clippy` uyarısı, sıfır üçüncü parti crate ve sıfır Linux `-dev` paketi bağımlılığı)
 - **Temel Felsefe:** Hazır bir Chromium/WebKit/Gecko fork'u veya WebView kabuğu **değildir**. URL ayrıştırmadan ağ katmanına, HTML/DOM ağacından CSS, Layout ve Paint aşamasına kadar tüm boru hattı (pipeline) sıfırdan, eğitici ve anlaşılır Türkçe yorum satırlarıyla yazılmaktadır.
 
 ---
@@ -36,8 +36,9 @@ Bu doküman, geliştirme ortamı **Windows'tan Milis Linux'a** taşınırken Ant
 | **`crates/anka-html`** | Hata toleranslı (kapanmamış etiketlerde çökmeyen) HTML5 Tokenizer ve DOM ağacı (`DomNode`), etiket özellikleri (`attributes`), `extract_title` (`<title>`), `extract_styles` (`<style>`), `extract_stylesheet_links` (`<link rel="stylesheet">`), `decode_html_entities` (`&amp;`, `&nbsp;` vb.). | 6 ✅ |
 | **`crates/anka-css`** | `parse_css`: Seçici (`selector`) ve özellik (`Declaration`: `property`, `value`) ayrıştırıcı. | 2 ✅ |
 | **`crates/anka-layout`** | `compute_layout`: DOM + CSS birleştirme, `selector_matches` (`tag`, `.class`, `#id`, `tag.class`), satır içi `style="..."`, otomatik satır kaydırma (`wrap_text`), `<li>` madde işareti (`• `), `<hr>` yatay çizgi, `<img src alt width height>` görsel kutu yerleşimi (`image_src`), kısa `<a>`/`<span>`/`<button>` öğelerinin yan yana (`inline`) dizilimi, `bg_color` ve `border_color`. | 4 ✅ |
-| **`crates/anka-paint`** | `build_display_list`: İngilizce renk adlarını ve 6/3 haneli Hex renk kodlarını (`#ff5733`, `#0f0`) `RgbColor` piksellerine ve `PaintCommand` listesine dönüştürme. Sıfır crate ile `DecodedImage` görsel çözücü (saf Rust BMP & PPM P6 + Linux `gdk-pixbuf` PNG/JPEG/GIF/WebP + dahili Anka amblemi üreticisi). | 4 ✅ |
-| **`crates/anka-browser`** | `motoru_calistir`, akıllı adres çubuğu (`normalize_address`), çoklu sekme (`Vec<TabState>`) ve yer imleri (`Vec<Bookmark>`, `anka.local/yer-imleri`) destekli ortak tarayıcı durumu (`browser_state.rs`), Windows için Win32 GDI masaüstü penceresi (`win32_gui.rs`), Linux (Wayland/X11) için GTK3 + Cairo 2D masaüstü penceresi (`linux_gui.rs`) ve CI için terminal önizlemesi (`main.rs`). | 4 ✅ |
+| **`crates/anka-paint`** | `build_display_list`: İngilizce renk adlarını ve 6/3 haneli Hex renk kodlarını (`#ff5733`, `#0f0`) `RgbColor` piksellerine ve `PaintCommand` listesine dönüştürme. Sıfır crate ile `DecodedImage` görsel çözücü (saf Rust BMP & PPM P6 + Linux `dlopen` `gdk-pixbuf` PNG/JPEG/GIF/WebP + dahili Anka amblemi üreticisi). | 4 ✅ |
+| **`crates/anka-js`** | **7. İstasyon (Sıfırdan JS Motoru):** Kendi Lexer ve Evaluator'ı (`JsRuntime`), `let/const/var`, aritmetik/metin birleştirme, `if/else`, `function`, `console.log`, `document.title` ve canlı DOM güncellemesi (`document.getElementById(...).innerText` ve `style.*`). | 3 ✅ |
+| **`crates/anka-browser`** | `motoru_calistir` & canlı `LoadedPage::run_inline_js`, akıllı adres çubuğu (`normalize_address` + `file://`), çoklu sekme (`Vec<TabState>`), yer imleri (`Vec<Bookmark>`), canlı `<button onclick="...">` etkileşimi, Windows Win32 GDI ve Linux `dlopen` GTK3/Cairo 2D GUI. | 4 ✅ |
 
 ---
 

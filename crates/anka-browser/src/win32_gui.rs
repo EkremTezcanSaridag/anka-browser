@@ -8,7 +8,7 @@ use std::ffi::c_void;
 use std::ptr::{null, null_mut};
 use std::sync::Mutex;
 
-use crate::browser_state::BrowserState;
+use crate::browser_state::{BrowserState, ClickAction};
 
 type HWND = *mut c_void;
 type HINSTANCE = *mut c_void;
@@ -688,11 +688,8 @@ unsafe extern "system" fn wnd_proc(
             let link_var_mi = {
                 let guard = DURUM.lock().ok();
                 guard.is_some_and(|g| {
-                    g.as_ref().is_some_and(|st| {
-                        st.state
-                            .link_at(mouse_x, mouse_y - TOOLBAR_HEIGHT)
-                            .is_some()
-                    })
+                    g.as_ref()
+                        .is_some_and(|st| st.state.is_interactive_at(mouse_x, mouse_y - TOOLBAR_HEIGHT))
                 })
             };
 
@@ -706,15 +703,20 @@ unsafe extern "system" fn wnd_proc(
         WM_LBUTTONDOWN => {
             let click_x = (lparam & 0xFFFF) as i16 as i32;
             let click_y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
-            let hedef_link = {
-                let guard = DURUM.lock().ok();
-                guard.and_then(|g| {
-                    g.as_ref()
-                        .and_then(|st| st.state.link_at(click_x, click_y - TOOLBAR_HEIGHT))
-                })
+            let action = {
+                let mut guard = DURUM.lock().ok();
+                if let Some(st) = guard.as_mut().and_then(|g| g.as_mut()) {
+                    let act = st.state.click_at(click_x, click_y - TOOLBAR_HEIGHT);
+                    if act == ClickAction::JsUpdated {
+                        pencereyi_yenile(hwnd, st);
+                    }
+                    act
+                } else {
+                    ClickAction::None
+                }
             };
 
-            if let Some(yeni_adres) = hedef_link {
+            if let ClickAction::Navigate(yeni_adres) = action {
                 sayfayi_yukle_ve_yenile(hwnd, &yeni_adres, true);
             }
             0

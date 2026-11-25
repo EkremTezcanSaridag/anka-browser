@@ -60,6 +60,57 @@ impl DomNode {
             .find(|(k, _)| k.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
     }
+
+    /// Etiketin belirli bir özelliğini (örn: `"style"`) günceller veya yoksa yeni ekler.
+    pub fn set_attribute(&mut self, name: &str, value: &str) {
+        if let Some((_, v)) = self
+            .attributes
+            .iter_mut()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        {
+            *v = value.to_string();
+        } else {
+            self.attributes.push((name.to_lowercase(), value.to_string()));
+        }
+    }
+
+    /// Bu düğümün tüm çocuklarını temizleyip içine tek bir düz yazı (`NodeType::Text`) yerleştirir.
+    /// JavaScript'teki `element.innerText = "..."` / `textContent = "..."` işleminin karşılığıdır!
+    pub fn set_text(&mut self, new_text: &str) {
+        self.children.clear();
+        self.children.push(DomNode::text(new_text));
+    }
+
+    /// Bu düğümün içindeki düz metni okur (JavaScript `element.innerText` okuması için).
+    pub fn get_text(&self) -> String {
+        let mut out = String::new();
+        for child in &self.children {
+            match &child.node_type {
+                NodeType::Text(t) => out.push_str(t),
+                NodeType::Element(_) => out.push_str(&child.get_text()),
+            }
+        }
+        out
+    }
+
+    /// DOM ağacında `id="..."` özelliği verilen kimlikle eşleşen düğümü değiştirilebilir (`&mut`)
+    /// olarak bulur (`document.getElementById("...")` temel taşı!).
+    pub fn find_by_id_mut(&mut self, target_id: &str) -> Option<&mut DomNode> {
+        if let NodeType::Element(_) = &self.node_type
+            && self
+                .get_attribute("id")
+                .is_some_and(|v| v.trim() == target_id)
+        {
+            return Some(self);
+        }
+
+        for child in &mut self.children {
+            if let Some(found) = child.find_by_id_mut(target_id) {
+                return Some(found);
+            }
+        }
+        None
+    }
 }
 
 /// Etiketin içindeki özellikleri (örn: `a href="Status.html"`) ayrıştırır
@@ -173,9 +224,42 @@ pub fn parse_html(raw: &str) -> DomNode {
                             .push(DomNode::element_with_attrs(&etiket_adi, ozellikler));
                     }
                 } else {
-                    // Normal açılış etiketi (örn: <h1> veya <a href="...">):
-                    // Yeni kutuyu aç ve masanın en üstüne koy (içine gelecek yazıları beklesin)
-                    stack.push(DomNode::element_with_attrs(&etiket_adi, ozellikler));
+                    // ÖZEL RAW TEXT KURALI (`<script>` ve `<style>`):
+                    // JavaScript içindeki `if (x < 5)` gibi `<` işaretleri HTML etiketi sanılmasın diye,
+                    // `</script>` kapanış etiketini görene kadar tüm ham kodu tek parça metin olarak al!
+                    if etiket_adi == "script" {
+                        let mut script_node =
+                            DomNode::element_with_attrs(&etiket_adi, ozellikler);
+                        let lower_kalan = kalan.to_lowercase();
+                        if let Some(end_idx) = lower_kalan.find("</script>") {
+                            let js_kod = kalan[..end_idx].trim();
+                            if !js_kod.is_empty() {
+                                script_node.children.push(DomNode {
+                                    node_type: NodeType::Text(js_kod.to_string()),
+                                    attributes: Vec::new(),
+                                    children: Vec::new(),
+                                });
+                            }
+                            kalan = &kalan[end_idx + "</script>".len()..];
+                        } else {
+                            let js_kod = kalan.trim();
+                            if !js_kod.is_empty() {
+                                script_node.children.push(DomNode {
+                                    node_type: NodeType::Text(js_kod.to_string()),
+                                    attributes: Vec::new(),
+                                    children: Vec::new(),
+                                });
+                            }
+                            kalan = "";
+                        }
+                        if let Some(acik_kutu) = stack.last_mut() {
+                            acik_kutu.children.push(script_node);
+                        }
+                    } else {
+                        // Normal açılış etiketi (örn: <h1> veya <a href="...">):
+                        // Yeni kutuyu aç ve masanın en üstüne koy (içine gelecek yazıları beklesin)
+                        stack.push(DomNode::element_with_attrs(&etiket_adi, ozellikler));
+                    }
                 }
             }
         } else {
@@ -252,6 +336,32 @@ pub fn extract_styles(node: &DomNode) -> String {
     let mut css = String::new();
     collect_styles(node, &mut css);
     css
+}
+
+/// DOM ağacındaki tüm `<script>...</script>` bloklarının içindeki JavaScript kaynak kodlarını sırayla toplar.
+pub fn extract_scripts(node: &DomNode) -> Vec<String> {
+    let mut scripts = Vec::new();
+    collect_scripts(node, &mut scripts);
+    scripts
+}
+
+fn collect_scripts(node: &DomNode, out: &mut Vec<String>) {
+    if let NodeType::Element(tag) = &node.node_type
+        && tag == "script"
+    {
+        for child in &node.children {
+            if let NodeType::Text(code) = &child.node_type
+                && !code.trim().is_empty()
+            {
+                out.push(code.clone());
+            }
+        }
+        return;
+    }
+
+    for child in &node.children {
+        collect_scripts(child, out);
+    }
 }
 
 /// DOM ağacındaki `<link rel="stylesheet" href="...">` etiketlerinin `href` adreslerini toplar.
@@ -379,5 +489,21 @@ mod tests {
 
         let links = extract_stylesheet_links(&kok);
         assert_eq!(links, vec!["/css/main.css".to_string()]);
+    }
+
+    #[test]
+    fn test_script_cikarma_ve_dom_id_guncelleme() {
+        let html = "<html><body><p id=\"sayac\">0</p><script>if (a < 5) { a = a + 1; }</script></body></html>";
+        let mut kok = parse_html(html);
+
+        // `<script>` içindeki `<` işareti HTML etiketi sanılmadan ham JS olarak çıkarılmalı!
+        let scripts = extract_scripts(&kok);
+        assert_eq!(scripts, vec!["if (a < 5) { a = a + 1; }".to_string()]);
+
+        // `find_by_id_mut` ile `<p id="sayac">` bulunup canlı olarak metni değiştirilebilmeli!
+        let node = kok.find_by_id_mut("sayac").expect("sayac bulunmali");
+        assert_eq!(node.get_text(), "0");
+        node.set_text("42");
+        assert_eq!(node.get_text(), "42");
     }
 }

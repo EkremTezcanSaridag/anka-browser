@@ -1,7 +1,12 @@
-// Anka Browser - Ana Tarayıcı Uygulaması (6 İstasyonlu Motor + Yerel Masaüstü Penceresi)
+// Anka Browser - Ana Tarayıcı Uygulaması (7 İstasyonlu Telek Engine + Linux/Windows GUI)
 
-use anka_css::parse_css;
-use anka_html::{extract_styles, extract_stylesheet_links, extract_title, parse_html};
+use std::collections::HashMap;
+
+use anka_css::{CssRule, parse_css};
+use anka_html::{
+    DomNode, extract_scripts, extract_styles, extract_stylesheet_links, extract_title, parse_html,
+};
+use anka_js::JsRuntime;
 use anka_layout::compute_layout;
 use anka_net::{fetch, parse_http_response};
 use anka_paint::{DecodedImage, PaintCommand, build_display_list};
@@ -16,6 +21,104 @@ mod win32_gui;
 #[cfg(target_os = "linux")]
 mod linux_gui;
 
+/// Bir sayfanın 7 istasyondan geçtikten sonraki canlı belgesi (`LoadedPage`):
+/// - DOM ağacını, CSS kurallarını, görsel önbelleğini ve canlı JavaScript ortamını saklar!
+/// - Böylece kullanıcı bir `<button onclick="...">` butonuna bastığında internetten tekrar
+///   indirme yapmadan doğrudan bellekteki DOM'u değiştirip sayfayı anında yeniden çizer!
+#[derive(Clone)]
+pub struct LoadedPage {
+    pub parsed_url: Option<Url>,
+    pub dom: Option<DomNode>,
+    pub css_rules: Vec<CssRule>,
+    pub js_runtime: JsRuntime,
+    pub image_cache: HashMap<String, DecodedImage>,
+    pub page_title: Option<String>,
+    pub status_message: String,
+    pub display_list: Vec<PaintCommand>,
+    pub status_code: u16,
+    pub body_len: usize,
+}
+
+impl LoadedPage {
+    /// Hata durumunda boş bir sayfa nesnesi oluşturur.
+    fn error(message: String) -> Self {
+        Self {
+            parsed_url: None,
+            dom: None,
+            css_rules: Vec::new(),
+            js_runtime: JsRuntime::new(),
+            image_cache: HashMap::new(),
+            page_title: None,
+            status_message: message,
+            display_list: Vec::new(),
+            status_code: 0,
+            body_len: 0,
+        }
+    }
+
+    /// Mevcut canlı DOM ağacı (`self.dom`) değiştiğinde (örneğin bir `onclick` JS kodu çalıştığında)
+    /// ağa tekrar gitmeden yalnızca `anka-layout -> anka-paint` aşamasını ışık hızında yeniden çalıştırır!
+    pub fn re_render(&mut self, viewport_width: u32) {
+        let Some(dom) = &self.dom else {
+            return;
+        };
+
+        // `document.title` JS tarafından değiştirildiyse onu öncelikli kullan:
+        self.page_title = self
+            .js_runtime
+            .document_title
+            .clone()
+            .or_else(|| extract_title(dom));
+
+        let yerlesim_kutulari = compute_layout(dom, &self.css_rules, viewport_width);
+        let mut cizim_listesi = build_display_list(&yerlesim_kutulari);
+
+        // Görselleri önbellekten bağla (yeniden ağdan indirmeye gerek yok!)
+        for komut in &mut cizim_listesi {
+            if let Some(src) = &komut.image_src {
+                if let Some(cached) = self.image_cache.get(src) {
+                    komut.image = Some(cached.clone());
+                } else if src.contains("anka-logo") {
+                    let banner = DecodedImage::generate_anka_banner(komut.width, komut.height);
+                    self.image_cache.insert(src.clone(), banner.clone());
+                    komut.image = Some(banner);
+                }
+            }
+        }
+
+        let protokol_etiketi = match self.parsed_url.as_ref().map(|u| u.scheme.as_str()) {
+            Some("https") => "HTTPS/TLS",
+            Some("file") => "FILE",
+            _ => "HTTP",
+        };
+
+        let js_notu = if let Some(son_log) = self.js_runtime.logs.last() {
+            format!(" | JS: {son_log}")
+        } else {
+            String::new()
+        };
+
+        self.status_message = format!(
+            "{} {} | {} bayt | {} kutu | Telek Engine v0.2.7{}",
+            protokol_etiketi,
+            self.status_code,
+            self.body_len,
+            cizim_listesi.len(),
+            js_notu
+        );
+        self.display_list = cizim_listesi;
+    }
+
+    /// Kullanıcının tıkladığı bir öğedeki `onclick="..."` JavaScript kodunu canlı çalıştırır
+    /// ve değişen DOM'u yeniden çizer!
+    pub fn run_inline_js(&mut self, js_code: &str, viewport_width: u32) {
+        if let Some(dom) = self.dom.as_mut() {
+            self.js_runtime.eval(js_code, dom);
+        }
+        self.re_render(viewport_width);
+    }
+}
+
 /// Akıllı adres çubuğu:
 /// - `/home/.../dosya.html` veya `C:\...\dosya.html` gibi yerel dosya yolu girildiyse otomatik `file://` ekler.
 /// - Protokol yazılmayan web adreslerinin başına otomatik `https://` ekler.
@@ -24,11 +127,9 @@ pub fn normalize_address(raw: &str) -> String {
     if trimmed.is_empty() || trimmed.contains("://") {
         return trimmed.to_string();
     }
-    // Linux/Unix yerel dosya yolu: `/home/...`
     if trimmed.starts_with('/') {
         return format!("file://{trimmed}");
     }
-    // Windows yerel dosya yolu: `C:\...` veya `C:/...`
     let b = trimmed.as_bytes();
     if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
     {
@@ -38,41 +139,48 @@ pub fn normalize_address(raw: &str) -> String {
     format!("https://{trimmed}")
 }
 
-/// verilen ham HTML/HTTP yanıtını 6 istasyondan geçirip çizer (örn: `http://anka.local/yer-imleri`).
+/// Verilen ham HTML/HTTP yanıtını 7 istasyondan (HTML -> JS -> CSS -> Layout -> Paint) geçirip canlı `LoadedPage` üretir.
 pub fn html_motoru_calistir(
     sayfa_url_str: &str,
     ham_http_yaniti: &str,
     viewport_width: u32,
-) -> (Option<String>, String, Vec<PaintCommand>) {
+) -> LoadedPage {
     let Ok(url) = Url::parse(sayfa_url_str) else {
-        return (None, "Gecersiz dahili URL".to_string(), Vec::new());
+        return LoadedPage::error("Gecersiz dahili URL".to_string());
     };
     let Ok(yanit) = parse_http_response(ham_http_yaniti) else {
-        return (None, "Dahili HTTP yanit hatasi".to_string(), Vec::new());
+        return LoadedPage::error("Dahili HTTP yanit hatasi".to_string());
     };
-    yaniti_cizime_donustur(&url, &yanit, viewport_width)
+    yaniti_canli_sayfaya_donustur(&url, &yanit, viewport_width)
 }
 
-fn yaniti_cizime_donustur(
+fn yaniti_canli_sayfaya_donustur(
     url: &Url,
     yanit: &anka_net::HttpResponse,
     viewport_width: u32,
-) -> (Option<String>, String, Vec<PaintCommand>) {
-    // İSTASYON 3: anka-html (HTML Metnini DOM Ağacına Çevirme ve <title> Çıkarma)
-    let dom_agaci = parse_html(&yanit.body);
-    let sayfa_basligi = extract_title(&dom_agaci);
+) -> LoadedPage {
+    // İSTASYON 3: anka-html (HTML Metnini DOM Ağacına Çevirme)
+    let mut dom_agaci = parse_html(&yanit.body);
 
-    // İSTASYON 4: anka-css (Varsayılan Stiller + Sayfa İçi <style> + Harici <link rel="stylesheet">)
+    // İSTASYON 7: anka-js (Sayfadaki tüm `<script>...</script>` bloklarını canlı DOM üzerinde çalıştır!)
+    let mut js_runtime = JsRuntime::new();
+    js_runtime.document_title = extract_title(&dom_agaci);
+    let scripts = extract_scripts(&dom_agaci);
+    for script_code in scripts {
+        js_runtime.eval(&script_code, &mut dom_agaci);
+    }
+
+    // İSTASYON 4: anka-css (Varsayılan Stiller + Harici CSS + Sayfa İçi `<style>`)
     let varsayilan_css = "
         h1 { color: red; font-size: 30px; }
         h2 { color: blue; font-size: 22px; }
         p  { color: black; font-size: 16px; }
         li { color: black; font-size: 16px; }
         a  { color: blue; font-size: 16px; }
+        button { color: #0f172a; background-color: #e2e8f0; border: 1px solid #94a3b8; font-size: 15px; }
     ";
     let mut css_kurallari = parse_css(varsayilan_css);
 
-    // A) Harici CSS dosyalarını (<link rel="stylesheet" href="...">) indir ve ekle (en fazla 3 dosya)
     if url.host != "anka.local" {
         for css_href in extract_stylesheet_links(&dom_agaci).into_iter().take(3) {
             if let Ok(css_url) = url.resolve(&css_href)
@@ -83,82 +191,70 @@ fn yaniti_cizime_donustur(
         }
     }
 
-    // B) Sayfa içi <style>...</style> kurallarını ekle
     let sayfa_css = extract_styles(&dom_agaci);
     if !sayfa_css.trim().is_empty() {
         css_kurallari.extend(parse_css(&sayfa_css));
     }
 
-    // İSTASYON 5: anka-layout (Kutuların Ekrandaki X, Y Koordinatlarını ve Satır Kaydırmayı Hesaplama)
+    // İSTASYON 5 & 6: İlk Layout + Görsel İndirme Önbelleği
     let yerlesim_kutulari = compute_layout(&dom_agaci, &css_kurallari, viewport_width);
-
-    // İSTASYON 6: anka-paint (RGB Çizim Listesini Üretme ve `<img>` Görsellerini Çözme)
-    let mut cizim_listesi = build_display_list(&yerlesim_kutulari);
-
-    // Sayfadaki `<img>` etiketleri için görselleri indirip piksellerine (`DecodedImage`) çöz (en fazla 6 görsel):
+    let mut image_cache = HashMap::new();
     let mut indirilen_gorsel = 0usize;
-    for komut in &mut cizim_listesi {
-        if let Some(src) = &komut.image_src {
-            // A) Dahili Anka test görseli (`http://anka.local/anka-logo.bmp` veya `/anka-logo.bmp`)
-            if src.contains("anka-logo") {
-                komut.image = Some(DecodedImage::generate_anka_banner(
-                    komut.width,
-                    komut.height,
-                ));
+
+    for kutu in &yerlesim_kutulari {
+        if let Some(src) = &kutu.image_src {
+            if image_cache.contains_key(src) {
                 continue;
             }
-
-            // B) Gerçek internet üzerindeki görseller (`https://...` veya bağıl `/resim.png`)
-            if indirilen_gorsel < 6
+            if src.contains("anka-logo") {
+                image_cache.insert(
+                    src.clone(),
+                    DecodedImage::generate_anka_banner(kutu.width, kutu.height),
+                );
+                continue;
+            }
+            if indirilen_gorsel < 8
                 && url.host != "anka.local"
                 && let Ok(img_url) = url.resolve(src)
                 && let Ok(img_resp) = fetch(&img_url)
                 && let Some(decoded) = DecodedImage::decode_bytes(&img_resp.raw_body)
             {
-                komut.image = Some(decoded);
+                image_cache.insert(src.clone(), decoded);
                 indirilen_gorsel += 1;
             }
         }
     }
 
-    let protokol_etiketi = match url.scheme.as_str() {
-        "https" => "HTTPS/TLS",
-        "file" => "FILE",
-        _ => "HTTP",
+    let mut page = LoadedPage {
+        parsed_url: Some(url.clone()),
+        dom: Some(dom_agaci),
+        css_rules: css_kurallari,
+        js_runtime,
+        image_cache,
+        page_title: None,
+        status_message: String::new(),
+        display_list: Vec::new(),
+        status_code: yanit.status_code,
+        body_len: yanit.body.len(),
     };
-    let durum = format!(
-        "{} {} | {} bayt indirildi | {} satir/kutu Telek Engine v0.2.6 ile cizildi",
-        protokol_etiketi,
-        yanit.status_code,
-        yanit.body.len(),
-        cizim_listesi.len()
-    );
-
-    (sayfa_basligi, durum, cizim_listesi)
+    page.re_render(viewport_width);
+    page
 }
 
-/// 6 İSTASYONLUK MOTORU ATEŞLEYEN ORTAK FONKSİYON:
-/// Verilen adresi alır: anka-url -> anka-net -> anka-html -> anka-css -> anka-layout -> anka-paint
-/// sırasıyla işleyip (Sayfa Başlığı, Durum Mesajı, Çizim Listesi) döndürür.
-pub fn motoru_calistir(
-    hedef_adres: &str,
-    viewport_width: u32,
-) -> (Option<String>, String, Vec<PaintCommand>) {
+/// 7 İSTASYONLUK MOTORU ATEŞLEYEN ANA FONKSİYON:
+/// `anka-url -> anka-net -> anka-html -> anka-js -> anka-css -> anka-layout -> anka-paint`
+pub fn motoru_calistir(hedef_adres: &str, viewport_width: u32) -> LoadedPage {
     let hedef = normalize_address(hedef_adres);
 
     // İSTASYON 1: anka-url (Adresi Doğrama)
     let url = match Url::parse(&hedef) {
         Ok(u) => u,
         Err(hata) => {
-            return (
-                None,
-                format!("Hata [anka-url] Gecersiz adres ({hedef}): {hata:?}"),
-                Vec::new(),
-            );
+            return LoadedPage::error(format!("Hata [anka-url] Gecersiz adres ({hedef}): {hata:?}"));
         }
     };
 
-    // İSTASYON 2: anka-net (İnternetten veya Dahili Sayfadan HTML İndirme)
+    // İSTASYON 2: anka-net (İnternetten, Yerel Diskten veya Dahili Sayfadan HTML İndirme)
     let yanit = if url.host == "anka.local" {
         let dahili_http = concat!(
             "HTTP/1.1 200 OK\r\n",
@@ -169,11 +265,13 @@ pub fn motoru_calistir(
             "p  { color: #334155; font-size: 16px; }",
             "li { color: #0f766e; font-size: 16px; }",
             ".pill { color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; font-size: 15px; }",
+            ".jsbtn { color: #ffffff; background-color: #16a34a; border: 1px solid #15803d; font-size: 15px; }",
+            ".jsreset { color: #ffffff; background-color: #dc2626; border: 1px solid #b91c1c; font-size: 15px; }",
             ".satir { display: flex; gap: 14px; }",
             ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; padding: 10px; font-size: 15px; }",
             "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; padding: 10px; font-size: 15px; }",
             "</style></head><body>",
-            "<h1>Anka Browser v0.2.6 — Telek Engine</h1>",
+            "<h1>Anka Browser v0.2.7 — Telek Engine + Anka JS!</h1>",
             "<nav>",
             "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
             "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
@@ -182,42 +280,54 @@ pub fn motoru_calistir(
             "</nav>",
             "<hr>",
             "<img src=\"http://anka.local/anka-logo.bmp\" alt=\"Anka Telek Engine Piksel Amblemi\" width=\"380\" height=\"110\">",
-            "<h2>CSS Flexbox (Yan Yana Sutunlar), Kutu Modeli ve Yerel file:// Destegi!</h2>",
+            "<h2>7. Istasyon: Sifirdan JavaScript Motoru (anka-js) Canli Testi!</h2>",
             "<div class=\"satir\">",
-            "<div class=\"kart\"><p>Sol Flexbox Sutunu: Cok satirli kartlar artik tek bir butun cerceve icinde ve padding/margin kurallariyla cizilir!</p></div>",
-            "<div id=\"duyuru\"><p>Sag Flexbox Sutunu: Adres cubuguna /home/.../index.html veya file:///... yazarak yerel HTML dosyalarini sunucusuz acabilirsiniz!</p></div>",
+            "<div class=\"kart\">",
+            "<p id=\"js_sayac\">Yukleniyor...</p>",
+            "<button class=\"jsbtn\" onclick=\"artir()\">+1 Artir (JS)</button>",
+            "<button class=\"jsreset\" onclick=\"sifirla()\">Sifirla</button>",
             "</div>",
-            "<ul>",
-            "<li>Linux dlopen dinamik yukleme: -dev paketi olmadan her Linux dagitiminda ve CI'da sifir hata!</li>",
-            "<li>CSS Flexbox (display: flex, gap), Kutu Modeli (padding, margin, text-align) ve birlesik kartlar</li>",
-            "<li>Yerel file:// protokolu, Coklu Sekme, Yer Imleri ve gercek PNG/BMP gorsel cizimi</li>",
-            "</ul>",
+            "<div id=\"duyuru\"><p>Sol kutudaki yesil butona tikladiginizda sifirdan yazdigimiz anka-js motoru calisip DOM agacini aninda gunceller!</p></div>",
+            "</div>",
+            "<script>",
+            "let tiklama = 0;",
+            "document.getElementById(\"js_sayac\").innerText = \"Anka JS Hazir! Tiklama Sayisi: 0\";",
+            "console.log(\"Anka JS v0.2.7 baslatildi!\");",
+            "function artir() {",
+            "  tiklama++;",
+            "  document.getElementById(\"js_sayac\").innerText = \"Tiklama Sayisi: \" + tiklama;",
+            "  console.log(\"Butona tiklandi -> \" + tiklama);",
+            "  if (tiklama >= 5) {",
+            "    document.getElementById(\"js_sayac\").style.color = \"#dc2626\";",
+            "  }",
+            "}",
+            "function sifirla() {",
+            "  tiklama = 0;",
+            "  document.getElementById(\"js_sayac\").innerText = \"Sayac Sifirlandi: 0\";",
+            "  document.getElementById(\"js_sayac\").style.color = \"#065f46\";",
+            "  console.log(\"Sayac sifirlandi\");",
+            "}",
+            "</script>",
             "</body></html>"
         );
         match parse_http_response(dahili_http) {
             Ok(r) => r,
             Err(e) => {
-                return (
-                    None,
-                    format!("Hata [anka-net] Dahili yanit hatasi: {e:?}"),
-                    Vec::new(),
-                );
+                return LoadedPage::error(format!("Hata [anka-net] Dahili yanit hatasi: {e:?}"));
             }
         }
     } else {
         match fetch(&url) {
             Ok(resp) => resp,
             Err(hata) => {
-                return (
-                    None,
-                    format!("Hata [anka-net] Baglanti kurulamadi ({hedef}): {hata:?}"),
-                    Vec::new(),
-                );
+                return LoadedPage::error(format!(
+                    "Hata [anka-net] Baglanti kurulamadi ({hedef}): {hata:?}"
+                ));
             }
         }
     };
 
-    yaniti_cizime_donustur(&url, &yanit, viewport_width)
+    yaniti_canli_sayfaya_donustur(&url, &yanit, viewport_width)
 }
 
 fn main() {
@@ -243,14 +353,14 @@ fn main() {
     // Ekransız (Headless / CI) ortamda veya diğer platformlarda terminal önizlemesi çalışır
     #[cfg(not(windows))]
     {
-        let (baslik, durum, cizim_listesi) = motoru_calistir(&baslangic_adresi, 860);
+        let sayfa = motoru_calistir(&baslangic_adresi, 860);
         println!(
-            "Anka Browser v0.2.6 ({}) [{}] -> {}",
+            "Anka Browser v0.2.7 ({}) [{}] -> {}",
             baslangic_adresi,
-            baslik.unwrap_or_else(|| "Adsız".to_string()),
-            durum
+            sayfa.page_title.as_deref().unwrap_or("Adsız"),
+            sayfa.status_message
         );
-        for komut in &cizim_listesi {
+        for komut in &sayfa.display_list {
             println!(
                 "[x:{:>2}, y:{:>3} | {:>2}px | RGB({:>3},{:>3},{:>3})] <{}> {}",
                 komut.x,

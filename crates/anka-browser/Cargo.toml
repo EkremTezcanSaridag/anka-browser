@@ -15,3 +15,4 @@ anka-html = { path = "../anka-html" }
 anka-css = { path = "../anka-css" }
 anka-layout = { path = "../anka-layout" }
 anka-paint = { path = "../anka-paint" }
+anka-js = { path = "../anka-js" }

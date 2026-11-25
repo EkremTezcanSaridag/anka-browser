@@ -505,6 +505,8 @@ pub struct PaintCommand {
     pub image_src: Option<String>,
     /// İndirilip piksellerine çözülmüş gerçek görsel verisi (varsa)
     pub image: Option<DecodedImage>,
+    /// Eğer bu kutuda JavaScript tıklama olayı (`onclick="..."`) varsa çalıştırılacak JS kodu
+    pub onclick: Option<String>,
 }
 
 /// `anka-layout` modülünden gelen koordinatlı kutuları (`LayoutBox`),
@@ -529,6 +531,7 @@ pub fn build_display_list(boxes: &[LayoutBox]) -> Vec<PaintCommand> {
             href: b.href.clone(),
             image_src: b.image_src.clone(),
             image: None,
+            onclick: b.onclick.clone(),
         });
     }
 
@@ -556,6 +559,7 @@ mod tests {
             text_align: "left".to_string(),
             href: None,
             image_src: None,
+            onclick: None,
         }];
 
         let cizim_listesi = build_display_list(&kutular);
