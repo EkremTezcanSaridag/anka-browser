@@ -76,6 +76,24 @@ impl Url {
         };
 
         // 5. ADIM: Site adı (host:port) ile sayfa yolunu (/path) ayır
+        // ÖZEL DURUM (`file://`): Yerel dosya adreslerinde (`file:///home/kullanici/index.html`
+        // veya Windows'ta `file:///C:/index.html`) host boş olabilir!
+        if scheme.eq_ignore_ascii_case("file") {
+            let file_path = if before_query.starts_with('/') {
+                before_query.to_string()
+            } else {
+                format!("/{before_query}")
+            };
+            return Ok(Url {
+                scheme: "file".to_string(),
+                host: String::new(),
+                port: None,
+                path: file_path,
+                query,
+                fragment,
+            });
+        }
+
         // Örn: "ornek.com:8080/haberler"
         //   -> host_and_port = "ornek.com:8080"
         //   -> path          = "/haberler" (Eğer hiç '/' yoksa varsayılan olarak "/" olur)
@@ -145,6 +163,21 @@ impl Url {
         // 2. "//ornek.com/yol" şeklinde protokolsüz link ise mevcut protokolü ekle
         if href.starts_with("//") {
             return Url::parse(&format!("{}:{}", self.scheme, href));
+        }
+
+        // `file://` adreslerinde bağıl kaynakları (`bayrak.png` veya `/bayrak.png`) aynı klasörden çöz!
+        if self.scheme == "file" {
+            let base_dir = match self.path.rfind('/') {
+                Some(idx) => &self.path[..=idx],
+                None => "/",
+            };
+            let target_path = if let Some(stripped) = href.strip_prefix('/') {
+                // Yerel HTML içinde `/bayrak.png` yazıldıysa önce aynı klasöre göre çöz:
+                format!("{base_dir}{stripped}")
+            } else {
+                format!("{base_dir}{href}")
+            };
+            return Url::parse(&format!("file://{target_path}"));
         }
 
         let port_str = match self.port {
@@ -229,5 +262,19 @@ mod tests {
         let tam = base.resolve("https://example.com/test").unwrap();
         assert_eq!(tam.scheme, "https");
         assert_eq!(tam.host, "example.com");
+    }
+
+    #[test]
+    fn test_file_yerel_dosya_url_ve_bagil_cozumleme() {
+        let html_url = Url::parse("file:///home/kullanici/masa/index.html").unwrap();
+        assert_eq!(html_url.scheme, "file");
+        assert_eq!(html_url.path, "/home/kullanici/masa/index.html");
+
+        let img_url = html_url.resolve("bayrak.png").unwrap();
+        assert_eq!(img_url.scheme, "file");
+        assert_eq!(img_url.path, "/home/kullanici/masa/bayrak.png");
+
+        let root_img = html_url.resolve("/renk.bmp").unwrap();
+        assert_eq!(root_img.path, "/home/kullanici/masa/renk.bmp");
     }
 }

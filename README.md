@@ -83,12 +83,12 @@ Anka'nın çekirdek motoru bir web sayfasını aşağıdaki boru hattı (pipelin
 - [x] **Faz 3 — `anka-layout` ve `anka-paint` ("Merhaba Web")**
   - [x] Block & Inline kutu modeli yerleşimi ve CSS stil eşleştirme (`crates/anka-layout`)
   - [x] RGB çizim komutları listesi (`crates/anka-paint`) ve 6 modülü birleştiren ana uygulama (`crates/anka-browser`)
-- [ ] **Faz 4 — Tarayıcı Arayüzü ve Etkileşim**
-  - [x] Sıfır bağımlılıklı yerel masaüstü grafik penceresi (Windows Win32 GDI & Linux GTK3/Cairo 2D GUI), adres çubuğu ve durum çubuğu (`crates/anka-browser`)
+- [x] **Faz 4 — Tarayıcı Arayüzü ve Etkileşim**
+  - [x] Sıfır bağımlılıklı yerel masaüstü grafik penceresi (Windows Win32 GDI & Linux `dlopen` GTK3/Cairo 2D GUI), adres çubuğu ve durum çubuğu (`crates/anka-browser`)
   - [x] Tıklanabilir bağlantılar (`<a href>`), ileri/geri geçmişi (`<-` / `->`) ve fare tekerleği ile kaydırma (scroll)
   - [x] Çoklu sekme (`Multi-Tab`: `+ Sekme`, `x Kapat`, sekme geçişi) ve Yer İmleri (`Bookmarks`: `★ Yer İmi` ve `anka.local/yer-imleri`)
-  - [x] `<img src="..." alt="...">` görsel kutu yerleşimi, saf Rust BMP/PPM + Linux `gdk-pixbuf` PNG/JPEG/WebP piksel çözümü ve Cairo/GDI çizimi
-  - [ ] Flexbox yerleşimi ve ileri CSS kutu modeli (`margin`, `padding`)
+  - [x] `<img src="..." alt="...">` görsel kutu yerleşimi, saf Rust BMP/PPM + Linux `dlopen` `gdk-pixbuf` PNG/JPEG/WebP piksel çözümü ve Cairo/GDI çizimi
+  - [x] Yerel dosya protokolü (`file://`), CSS Kutu Modeli (`padding`, `margin`, `text-align`), birleşik kart çerçeveleri ve CSS Flexbox (`display: flex`, `gap`)
 - [ ] **Faz 5 — JavaScript, Süreç İzolasyonu ve Güvenlik**
   - [ ] JavaScript motoru ve DOM API entegrasyonu
   - [ ] Çok süreçli (Multi-process) sekme izolasyonu ve yerleşik izleyici/reklam engelleyici

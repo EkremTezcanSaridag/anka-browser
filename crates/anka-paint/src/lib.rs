@@ -332,66 +332,116 @@ impl DecodedImage {
     }
 }
 
-/// Linux ortamında PNG, JPEG, GIF ve WebP görsellerini sistemde kurulu `libgdk_pixbuf-2.0.so`
-/// kütüphanesi üzerinden sıfır harici crate ile RGBA piksellerine çözen alt modül:
+/// Linux ortamında PNG, JPEG, GIF ve WebP görsellerini sistemde kurulu `libgdk_pixbuf-2.0.so.0`
+/// kütüphanesini `dlopen` ile çalışma zamanında yükleyerek sıfır crate ve sıfır `-dev`
+/// bağımlılığıyla RGBA piksellerine çözen alt modül:
 #[cfg(target_os = "linux")]
 mod linux_pixbuf {
-    use std::ffi::{c_int, c_void};
+    use std::ffi::{CStr, c_char, c_int, c_void};
     use std::ptr::null_mut;
+    use std::sync::OnceLock;
 
     use super::DecodedImage;
 
     type GdkPixbufLoader = c_void;
     type GdkPixbuf = c_void;
 
-    #[link(name = "gdk_pixbuf-2.0")]
+    const RTLD_NOW: c_int = 2;
+
     unsafe extern "C" {
-        fn gdk_pixbuf_loader_new() -> *mut GdkPixbufLoader;
-        fn gdk_pixbuf_loader_write(
-            loader: *mut GdkPixbufLoader,
-            buf: *const u8,
-            count: usize,
-            error: *mut *mut c_void,
-        ) -> c_int;
-        fn gdk_pixbuf_loader_close(loader: *mut GdkPixbufLoader, error: *mut *mut c_void) -> c_int;
-        fn gdk_pixbuf_loader_get_pixbuf(loader: *mut GdkPixbufLoader) -> *mut GdkPixbuf;
-        fn gdk_pixbuf_get_width(pixbuf: *const GdkPixbuf) -> c_int;
-        fn gdk_pixbuf_get_height(pixbuf: *const GdkPixbuf) -> c_int;
-        fn gdk_pixbuf_get_rowstride(pixbuf: *const GdkPixbuf) -> c_int;
-        fn gdk_pixbuf_get_n_channels(pixbuf: *const GdkPixbuf) -> c_int;
-        fn gdk_pixbuf_get_pixels(pixbuf: *const GdkPixbuf) -> *const u8;
+        fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     }
 
-    #[link(name = "gobject-2.0")]
-    unsafe extern "C" {
-        fn g_object_unref(object: *mut c_void);
+    struct PixbufApi {
+        loader_new: unsafe extern "C" fn() -> *mut GdkPixbufLoader,
+        loader_write:
+            unsafe extern "C" fn(*mut GdkPixbufLoader, *const u8, usize, *mut *mut c_void) -> c_int,
+        loader_close: unsafe extern "C" fn(*mut GdkPixbufLoader, *mut *mut c_void) -> c_int,
+        loader_get_pixbuf: unsafe extern "C" fn(*mut GdkPixbufLoader) -> *mut GdkPixbuf,
+        get_width: unsafe extern "C" fn(*const GdkPixbuf) -> c_int,
+        get_height: unsafe extern "C" fn(*const GdkPixbuf) -> c_int,
+        get_rowstride: unsafe extern "C" fn(*const GdkPixbuf) -> c_int,
+        get_n_channels: unsafe extern "C" fn(*const GdkPixbuf) -> c_int,
+        get_pixels: unsafe extern "C" fn(*const GdkPixbuf) -> *const u8,
+        object_unref: unsafe extern "C" fn(*mut c_void),
+    }
+
+    unsafe impl Send for PixbufApi {}
+    unsafe impl Sync for PixbufApi {}
+
+    static PIXBUF_API: OnceLock<Option<PixbufApi>> = OnceLock::new();
+
+    unsafe fn load_sym<T>(handle: *mut c_void, name: &CStr) -> Option<T> {
+        let ptr = unsafe { dlsym(handle, name.as_ptr()) };
+        if ptr.is_null() {
+            None
+        } else {
+            Some(unsafe { std::mem::transmute_copy(&ptr) })
+        }
+    }
+
+    fn pixbuf_api() -> Option<&'static PixbufApi> {
+        PIXBUF_API
+            .get_or_init(|| unsafe {
+                let pb = dlopen(c"libgdk_pixbuf-2.0.so.0".as_ptr(), RTLD_NOW);
+                let pb = if pb.is_null() {
+                    dlopen(c"libgdk_pixbuf-2.0.so".as_ptr(), RTLD_NOW)
+                } else {
+                    pb
+                };
+                let gobj = dlopen(c"libgobject-2.0.so.0".as_ptr(), RTLD_NOW);
+                let gobj = if gobj.is_null() {
+                    dlopen(c"libgobject-2.0.so".as_ptr(), RTLD_NOW)
+                } else {
+                    gobj
+                };
+                if pb.is_null() || gobj.is_null() {
+                    return None;
+                }
+
+                Some(PixbufApi {
+                    loader_new: load_sym(pb, c"gdk_pixbuf_loader_new")?,
+                    loader_write: load_sym(pb, c"gdk_pixbuf_loader_write")?,
+                    loader_close: load_sym(pb, c"gdk_pixbuf_loader_close")?,
+                    loader_get_pixbuf: load_sym(pb, c"gdk_pixbuf_loader_get_pixbuf")?,
+                    get_width: load_sym(pb, c"gdk_pixbuf_get_width")?,
+                    get_height: load_sym(pb, c"gdk_pixbuf_get_height")?,
+                    get_rowstride: load_sym(pb, c"gdk_pixbuf_get_rowstride")?,
+                    get_n_channels: load_sym(pb, c"gdk_pixbuf_get_n_channels")?,
+                    get_pixels: load_sym(pb, c"gdk_pixbuf_get_pixels")?,
+                    object_unref: load_sym(gobj, c"g_object_unref")?,
+                })
+            })
+            .as_ref()
     }
 
     pub fn decode_with_gdk_pixbuf(bytes: &[u8]) -> Option<DecodedImage> {
+        let api = pixbuf_api()?;
         unsafe {
-            let loader = gdk_pixbuf_loader_new();
+            let loader = (api.loader_new)();
             if loader.is_null() {
                 return None;
             }
 
-            let write_ok = gdk_pixbuf_loader_write(loader, bytes.as_ptr(), bytes.len(), null_mut());
-            let close_ok = gdk_pixbuf_loader_close(loader, null_mut());
+            let write_ok = (api.loader_write)(loader, bytes.as_ptr(), bytes.len(), null_mut());
+            let close_ok = (api.loader_close)(loader, null_mut());
             if write_ok == 0 || close_ok == 0 {
-                g_object_unref(loader);
+                (api.object_unref)(loader);
                 return None;
             }
 
-            let pixbuf = gdk_pixbuf_loader_get_pixbuf(loader);
+            let pixbuf = (api.loader_get_pixbuf)(loader);
             if pixbuf.is_null() {
-                g_object_unref(loader);
+                (api.object_unref)(loader);
                 return None;
             }
 
-            let w = gdk_pixbuf_get_width(pixbuf);
-            let h = gdk_pixbuf_get_height(pixbuf);
-            let rowstride = gdk_pixbuf_get_rowstride(pixbuf);
-            let channels = gdk_pixbuf_get_n_channels(pixbuf);
-            let pixels_ptr = gdk_pixbuf_get_pixels(pixbuf);
+            let w = (api.get_width)(pixbuf);
+            let h = (api.get_height)(pixbuf);
+            let rowstride = (api.get_rowstride)(pixbuf);
+            let channels = (api.get_n_channels)(pixbuf);
+            let pixels_ptr = (api.get_pixels)(pixbuf);
 
             if w <= 0
                 || h <= 0
@@ -400,7 +450,7 @@ mod linux_pixbuf {
                 || (channels != 3 && channels != 4)
                 || pixels_ptr.is_null()
             {
-                g_object_unref(loader);
+                (api.object_unref)(loader);
                 return None;
             }
 
@@ -424,8 +474,7 @@ mod linux_pixbuf {
                 }
             }
 
-            // `pixbuf` sahipliği `loader`'a aittir; `loader`'ı serbest bırakınca ikisi de temizlenir.
-            g_object_unref(loader);
+            (api.object_unref)(loader);
 
             Some(DecodedImage {
                 width,
@@ -446,6 +495,8 @@ pub struct PaintCommand {
     pub width: u32,
     pub height: u32,
     pub font_size: u32,
+    pub padding: u32,
+    pub text_align: String,
     pub color: RgbColor,
     pub bg_color: Option<RgbColor>,
     pub border_color: Option<RgbColor>,
@@ -470,6 +521,8 @@ pub fn build_display_list(boxes: &[LayoutBox]) -> Vec<PaintCommand> {
             width: b.width,
             height: b.height,
             font_size: b.font_size,
+            padding: b.padding,
+            text_align: b.text_align.clone(),
             color: RgbColor::from_css_name(&b.color),
             bg_color: b.bg_color.as_deref().map(RgbColor::from_css_name),
             border_color: b.border_color.as_deref().map(RgbColor::from_css_name),
@@ -499,6 +552,8 @@ mod tests {
             bg_color: Some("#f1f5f9".to_string()),
             border_color: Some("#cbd5e1".to_string()),
             font_size: 40,
+            padding: 0,
+            text_align: "left".to_string(),
             href: None,
             image_src: None,
         }];

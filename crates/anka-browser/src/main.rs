@@ -16,15 +16,26 @@ mod win32_gui;
 #[cfg(target_os = "linux")]
 mod linux_gui;
 
-/// Akıllı adres çubuğu: Kullanıcı protokol (`http://` veya `https://`) yazmayı unuttuysa
-/// otomatik olarak başına `https://` ekler.
+/// Akıllı adres çubuğu:
+/// - `/home/.../dosya.html` veya `C:\...\dosya.html` gibi yerel dosya yolu girildiyse otomatik `file://` ekler.
+/// - Protokol yazılmayan web adreslerinin başına otomatik `https://` ekler.
 pub fn normalize_address(raw: &str) -> String {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.contains("://") {
-        trimmed.to_string()
-    } else {
-        format!("https://{trimmed}")
+        return trimmed.to_string();
     }
+    // Linux/Unix yerel dosya yolu: `/home/...`
+    if trimmed.starts_with('/') {
+        return format!("file://{trimmed}");
+    }
+    // Windows yerel dosya yolu: `C:\...` veya `C:/...`
+    let b = trimmed.as_bytes();
+    if b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+    {
+        let normalized_slashes = trimmed.replace('\\', "/");
+        return format!("file:///{normalized_slashes}");
+    }
+    format!("https://{trimmed}")
 }
 
 /// verilen ham HTML/HTTP yanıtını 6 istasyondan geçirip çizer (örn: `http://anka.local/yer-imleri`).
@@ -110,13 +121,13 @@ fn yaniti_cizime_donustur(
         }
     }
 
-    let protokol_etiketi = if url.scheme == "https" {
-        "HTTPS/TLS"
-    } else {
-        "HTTP"
+    let protokol_etiketi = match url.scheme.as_str() {
+        "https" => "HTTPS/TLS",
+        "file" => "FILE",
+        _ => "HTTP",
     };
     let durum = format!(
-        "{} {} | {} bayt indirildi | {} satir/kutu Telek Engine v0.2.5 ile cizildi",
+        "{} {} | {} bayt indirildi | {} satir/kutu Telek Engine v0.2.6 ile cizildi",
         protokol_etiketi,
         yanit.status_code,
         yanit.body.len(),
@@ -153,15 +164,16 @@ pub fn motoru_calistir(
             "HTTP/1.1 200 OK\r\n",
             "Content-Type: text/html\r\n\r\n",
             "<html><head><title>Ana Sayfa</title><style>",
-            "h1 { color: #dc2626; background-color: #fef2f2; border: 1px solid #fecaca; font-size: 30px; }",
+            "h1 { color: #dc2626; background-color: #fef2f2; border: 1px solid #fecaca; font-size: 30px; padding: 6px; text-align: center; }",
             "h2 { color: #1d4ed8; font-size: 20px; }",
             "p  { color: #334155; font-size: 16px; }",
             "li { color: #0f766e; font-size: 16px; }",
             ".pill { color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; font-size: 15px; }",
-            ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; font-size: 16px; }",
-            "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; font-size: 16px; }",
+            ".satir { display: flex; gap: 14px; }",
+            ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; padding: 10px; font-size: 15px; }",
+            "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; padding: 10px; font-size: 15px; }",
             "</style></head><body>",
-            "<h1>Anka Browser v0.2.5 — Telek Engine</h1>",
+            "<h1>Anka Browser v0.2.6 — Telek Engine</h1>",
             "<nav>",
             "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
             "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
@@ -170,13 +182,15 @@ pub fn motoru_calistir(
             "</nav>",
             "<hr>",
             "<img src=\"http://anka.local/anka-logo.bmp\" alt=\"Anka Telek Engine Piksel Amblemi\" width=\"380\" height=\"110\">",
-            "<h2>Gercek Gorsel (&lt;img&gt;) Cizimi, Coklu Sekme ve Yer Imleri!</h2>",
-            "<div class=\"kart\"><p>Yukaridaki gorsel Telek Engine'in sifir bagimlilikli piksel motoruyla (Linux Cairo &amp; Windows GDI) gercek RGB pikselleri olarak cizilmistir.</p></div>",
-            "<div id=\"duyuru\"><p>BMP ve PPM gorselleri saf Rust cozucumuzle, Linux'ta PNG/JPEG/GIF/WebP gorselleri ise sistem gdk-pixbuf motoruyla cozulur.</p></div>",
+            "<h2>CSS Flexbox (Yan Yana Sutunlar), Kutu Modeli ve Yerel file:// Destegi!</h2>",
+            "<div class=\"satir\">",
+            "<div class=\"kart\"><p>Sol Flexbox Sutunu: Cok satirli kartlar artik tek bir butun cerceve icinde ve padding/margin kurallariyla cizilir!</p></div>",
+            "<div id=\"duyuru\"><p>Sag Flexbox Sutunu: Adres cubuguna /home/.../index.html veya file:///... yazarak yerel HTML dosyalarini sunucusuz acabilirsiniz!</p></div>",
+            "</div>",
             "<ul>",
-            "<li>&lt;img src=&quot;...&quot; alt=&quot;...&quot; width=&quot;...&quot; height=&quot;...&quot;&gt; kutu yerlesimi ve gercek piksel cizimi</li>",
-            "<li>Coklu Sekme (Vec&lt;TabState&gt;) ve Yer Imleri (anka.local/yer-imleri)</li>",
-            "<li>Sifir harici crate bagimliligiyla Linux (GTK3/Cairo) ve Windows (Win32/GDI)</li>",
+            "<li>Linux dlopen dinamik yukleme: -dev paketi olmadan her Linux dagitiminda ve CI'da sifir hata!</li>",
+            "<li>CSS Flexbox (display: flex, gap), Kutu Modeli (padding, margin, text-align) ve birlesik kartlar</li>",
+            "<li>Yerel file:// protokolu, Coklu Sekme, Yer Imleri ve gercek PNG/BMP gorsel cizimi</li>",
             "</ul>",
             "</body></html>"
         );
@@ -231,7 +245,7 @@ fn main() {
     {
         let (baslik, durum, cizim_listesi) = motoru_calistir(&baslangic_adresi, 860);
         println!(
-            "Anka Browser v0.2.5 ({}) [{}] -> {}",
+            "Anka Browser v0.2.6 ({}) [{}] -> {}",
             baslangic_adresi,
             baslik.unwrap_or_else(|| "Adsız".to_string()),
             durum
