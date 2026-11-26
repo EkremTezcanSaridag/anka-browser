@@ -113,7 +113,8 @@ impl DomNode {
     }
 }
 
-/// Etiketin içindeki özellikleri (örn: `a href="Status.html"`) ayrıştırır
+/// Etiketin içindeki özellikleri (örn: `a href="Status.html"` veya `div hidden class="x"`) ayrıştırır.
+/// Değer almayan mantıksal özellikleri (`hidden`, `disabled`, `checked`) de güvenle destekler!
 fn parse_tag_and_attrs(tag_content: &str) -> (String, Vec<(String, String)>) {
     let mut parts = tag_content.splitn(2, char::is_whitespace);
     let tag_name = parts.next().unwrap_or("").to_lowercase();
@@ -125,28 +126,55 @@ fn parse_tag_and_attrs(tag_content: &str) -> (String, Vec<(String, String)>) {
             if rest.is_empty() {
                 break;
             }
-            if let Some(eq_idx) = rest.find('=') {
-                let key = rest[..eq_idx].trim().to_lowercase();
-                let after_eq = rest[eq_idx + 1..].trim_start();
-                if let Some(quote) = after_eq.chars().next().filter(|&c| c == '"' || c == '\'') {
-                    let after_quote = &after_eq[1..];
-                    if let Some(end_quote) = after_quote.find(quote) {
-                        let val = after_quote[..end_quote].to_string();
-                        if !key.is_empty() {
-                            attrs.push((key, val));
-                        }
-                        rest = &after_quote[end_quote + 1..];
-                        continue;
+            // Bir sonraki boşluk ve `=` konumlarına bak: eğer `=`'den önce boşluk varsa
+            // bu değer almayan bir mantıksal özelliktir (örn: `hidden`, `disabled`).
+            let next_ws = rest.find(char::is_whitespace);
+            let next_eq = rest.find('=');
+
+            match (next_ws, next_eq) {
+                (Some(ws), Some(eq)) if ws < eq => {
+                    let bool_key = rest[..ws].trim().to_lowercase();
+                    if !bool_key.is_empty() {
+                        attrs.push((bool_key, String::new()));
                     }
+                    rest = &rest[ws..];
                 }
-                let end_val = after_eq.find(char::is_whitespace).unwrap_or(after_eq.len());
-                let val = after_eq[..end_val].to_string();
-                if !key.is_empty() {
-                    attrs.push((key, val));
+                (_, Some(eq_idx)) => {
+                    let key = rest[..eq_idx].trim().to_lowercase();
+                    let after_eq = rest[eq_idx + 1..].trim_start();
+                    if let Some(quote) = after_eq.chars().next().filter(|&c| c == '"' || c == '\'')
+                    {
+                        let after_quote = &after_eq[1..];
+                        if let Some(end_quote) = after_quote.find(quote) {
+                            let val = after_quote[..end_quote].to_string();
+                            if !key.is_empty() {
+                                attrs.push((key, val));
+                            }
+                            rest = &after_quote[end_quote + 1..];
+                            continue;
+                        }
+                    }
+                    let end_val = after_eq.find(char::is_whitespace).unwrap_or(after_eq.len());
+                    let val = after_eq[..end_val].to_string();
+                    if !key.is_empty() {
+                        attrs.push((key, val));
+                    }
+                    rest = &after_eq[end_val..];
                 }
-                rest = &after_eq[end_val..];
-            } else {
-                break;
+                (Some(ws), None) => {
+                    let bool_key = rest[..ws].trim().to_lowercase();
+                    if !bool_key.is_empty() {
+                        attrs.push((bool_key, String::new()));
+                    }
+                    rest = &rest[ws..];
+                }
+                (None, None) => {
+                    let bool_key = rest.trim().to_lowercase();
+                    if !bool_key.is_empty() {
+                        attrs.push((bool_key, String::new()));
+                    }
+                    break;
+                }
             }
         }
     }
@@ -176,6 +204,17 @@ pub fn parse_html(raw: &str) -> DomNode {
 
             // Şimdi '<' ile '>' arasındaki etiket kısmını bulalım
             kalan = &kalan[tag_start + 1..];
+
+            // HTML Yorumu (`<!-- ... -->`) içindeki `>` işaretlerinin yorumu erken kesmesini önle!
+            if kalan.starts_with("!--") {
+                if let Some(end_comment) = kalan.find("-->") {
+                    kalan = &kalan[end_comment + 3..];
+                } else {
+                    kalan = "";
+                }
+                continue;
+            }
+
             let Some(tag_end) = kalan.find('>') else {
                 // Eğer '>' kapatılmamışsa (bozuk HTML), döngüyü güvenle bitir
                 break;
@@ -225,27 +264,27 @@ pub fn parse_html(raw: &str) -> DomNode {
                     }
                 } else {
                     // ÖZEL RAW TEXT KURALI (`<script>` ve `<style>`):
-                    // JavaScript içindeki `if (x < 5)` gibi `<` işaretleri HTML etiketi sanılmasın diye,
-                    // `</script>` kapanış etiketini görene kadar tüm ham kodu tek parça metin olarak al!
-                    if etiket_adi == "script" {
-                        let mut script_node =
-                            DomNode::element_with_attrs(&etiket_adi, ozellikler);
+                    // JavaScript (`if (x < 5)`) veya CSS (`div > p`) içindeki `<` / `>` işaretleri
+                    // HTML etiketi sanılmasın diye kapanış etiketine kadar tüm ham kodu tek parça al!
+                    if etiket_adi == "script" || etiket_adi == "style" {
+                        let close_tag = format!("</{etiket_adi}>");
+                        let mut raw_node = DomNode::element_with_attrs(&etiket_adi, ozellikler);
                         let lower_kalan = kalan.to_lowercase();
-                        if let Some(end_idx) = lower_kalan.find("</script>") {
-                            let js_kod = kalan[..end_idx].trim();
-                            if !js_kod.is_empty() {
-                                script_node.children.push(DomNode {
-                                    node_type: NodeType::Text(js_kod.to_string()),
+                        if let Some(end_idx) = lower_kalan.find(&close_tag) {
+                            let raw_kod = kalan[..end_idx].trim();
+                            if !raw_kod.is_empty() {
+                                raw_node.children.push(DomNode {
+                                    node_type: NodeType::Text(raw_kod.to_string()),
                                     attributes: Vec::new(),
                                     children: Vec::new(),
                                 });
                             }
-                            kalan = &kalan[end_idx + "</script>".len()..];
+                            kalan = &kalan[end_idx + close_tag.len()..];
                         } else {
-                            let js_kod = kalan.trim();
-                            if !js_kod.is_empty() {
-                                script_node.children.push(DomNode {
-                                    node_type: NodeType::Text(js_kod.to_string()),
+                            let raw_kod = kalan.trim();
+                            if !raw_kod.is_empty() {
+                                raw_node.children.push(DomNode {
+                                    node_type: NodeType::Text(raw_kod.to_string()),
                                     attributes: Vec::new(),
                                     children: Vec::new(),
                                 });
@@ -253,7 +292,7 @@ pub fn parse_html(raw: &str) -> DomNode {
                             kalan = "";
                         }
                         if let Some(acik_kutu) = stack.last_mut() {
-                            acik_kutu.children.push(script_node);
+                            acik_kutu.children.push(raw_node);
                         }
                     } else {
                         // Normal açılış etiketi (örn: <h1> veya <a href="...">):
@@ -294,17 +333,63 @@ pub fn parse_html(raw: &str) -> DomNode {
     }
 }
 
-/// HTML içindeki özel karakter kodlarını (`&amp;`, `&nbsp;`, `&quot;` vb.)
-/// gerçek okunabilir karakterlere dönüştürür.
+/// HTML içindeki özel karakter kodlarını (`&amp;`, `&rsquo;`, `&mdash;`, `&#8217;`, `&#x27;` vb.)
+/// gerçek okunabilir Unicode karakterlere dönüştürür.
 pub fn decode_html_entities(input: &str) -> String {
-    input
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
-        .replace("&nbsp;", " ")
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+
+    while let Some(amp_idx) = rest.find('&') {
+        out.push_str(&rest[..amp_idx]);
+        let after_amp = &rest[amp_idx + 1..];
+
+        if let Some(semi_idx) = after_amp.find(';').filter(|&idx| idx > 0 && idx <= 12) {
+            let entity = &after_amp[..semi_idx];
+            if let Some(decoded) = decode_single_entity(entity) {
+                out.push_str(&decoded);
+                rest = &after_amp[semi_idx + 1..];
+                continue;
+            }
+        }
+        out.push('&');
+        rest = after_amp;
+    }
+    out.push_str(rest);
+    out
+}
+
+fn decode_single_entity(entity: &str) -> Option<String> {
+    if let Some(hex) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
+        let code = u32::from_str_radix(hex, 16).ok()?;
+        return char::from_u32(code).map(|c| c.to_string());
+    }
+    if let Some(dec) = entity.strip_prefix('#') {
+        let code = dec.parse::<u32>().ok()?;
+        return char::from_u32(code).map(|c| c.to_string());
+    }
+
+    let s = match entity {
+        "amp" => "&",
+        "lt" => "<",
+        "gt" => ">",
+        "quot" => "\"",
+        "apos" => "'",
+        "nbsp" => " ",
+        "rsquo" | "lsquo" => "'",
+        "rdquo" | "ldquo" => "\"",
+        "mdash" => "—",
+        "ndash" => "–",
+        "hellip" => "...",
+        "copy" => "©",
+        "reg" => "®",
+        "trade" => "™",
+        "laquo" => "«",
+        "raquo" => "»",
+        "bull" => "•",
+        "middot" => "·",
+        _ => return None,
+    };
+    Some(s.to_string())
 }
 
 /// DOM ağacındaki `<title>...</title>` etiketinin içindeki sayfa başlığını bulur.
@@ -505,5 +590,17 @@ mod tests {
         assert_eq!(node.get_text(), "0");
         node.set_text("42");
         assert_eq!(node.get_text(), "42");
+    }
+
+    #[test]
+    fn test_sayisal_entity_style_cocuk_secici_ve_hidden_ozelligi() {
+        let html = "<html><head><style>div > p { color: green; }</style></head><body><div hidden class=\"gizli\"><p>It&#8217;s &mdash; &ldquo;OK&rdquo; &#x21;</p></div></body></html>";
+        let kok = parse_html(html);
+
+        assert!(extract_styles(&kok).contains("div > p { color: green; }"));
+        let div = &kok.children[1].children[0];
+        assert!(div.get_attribute("hidden").is_some());
+        assert_eq!(div.get_attribute("class"), Some("gizli"));
+        assert_eq!(div.children[0].get_text(), "It’s — \"OK\" !");
     }
 }

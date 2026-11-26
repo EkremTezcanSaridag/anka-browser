@@ -7,9 +7,9 @@ use anka_html::{
     DomNode, extract_scripts, extract_styles, extract_stylesheet_links, extract_title, parse_html,
 };
 use anka_js::JsRuntime;
-use anka_layout::compute_layout;
+use anka_layout::{compute_layout, compute_layout_with_images, resolve_body_background};
 use anka_net::{fetch, parse_http_response};
-use anka_paint::{DecodedImage, PaintCommand, build_display_list};
+use anka_paint::{DecodedImage, PaintCommand, RgbColor, build_display_list};
 use anka_url::Url;
 
 #[cfg(any(windows, target_os = "linux", test))]
@@ -33,6 +33,7 @@ pub struct LoadedPage {
     pub js_runtime: JsRuntime,
     pub image_cache: HashMap<String, DecodedImage>,
     pub page_title: Option<String>,
+    pub page_bg: Option<RgbColor>,
     pub status_message: String,
     pub display_list: Vec<PaintCommand>,
     pub status_code: u16,
@@ -49,6 +50,7 @@ impl LoadedPage {
             js_runtime: JsRuntime::new(),
             image_cache: HashMap::new(),
             page_title: None,
+            page_bg: None,
             status_message: message,
             display_list: Vec::new(),
             status_code: 0,
@@ -70,7 +72,15 @@ impl LoadedPage {
             .clone()
             .or_else(|| extract_title(dom));
 
-        let yerlesim_kutulari = compute_layout(dom, &self.css_rules, viewport_width);
+        let image_sizes: HashMap<String, (u32, u32)> = self
+            .image_cache
+            .iter()
+            .map(|(k, img)| (k.clone(), (img.width, img.height)))
+            .collect();
+        let yerlesim_kutulari =
+            compute_layout_with_images(dom, &self.css_rules, viewport_width, &image_sizes);
+        self.page_bg = resolve_body_background(dom, &self.css_rules)
+            .and_then(|bg| RgbColor::try_from_css(&bg));
         let mut cizim_listesi = build_display_list(&yerlesim_kutulari);
 
         // Görselleri önbellekten bağla (yeniden ağdan indirmeye gerek yok!)
@@ -99,7 +109,7 @@ impl LoadedPage {
         };
 
         self.status_message = format!(
-            "{} {} | {} bayt | {} kutu | Telek Engine v0.2.8{}",
+            "{} {} | {} bayt | {} kutu | Telek Engine v0.2.9{}",
             protokol_etiketi,
             self.status_code,
             self.body_len,
@@ -232,6 +242,7 @@ fn yaniti_canli_sayfaya_donustur(
         js_runtime,
         image_cache,
         page_title: None,
+        page_bg: None,
         status_message: String::new(),
         display_list: Vec::new(),
         status_code: yanit.status_code,
@@ -271,7 +282,7 @@ pub fn motoru_calistir(hedef_adres: &str, viewport_width: u32) -> LoadedPage {
             ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; padding: 10px; font-size: 15px; }",
             "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; padding: 10px; font-size: 15px; }",
             "</style></head><body>",
-            "<h1>Anka Browser v0.2.8 — Telek Engine + Anka JS + Web Formlari!</h1>",
+            "<h1>Anka Browser v0.2.9 — Telek Engine + Gercek Web Siteleri!</h1>",
             "<nav>",
             "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
             "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
@@ -359,7 +370,7 @@ fn main() {
     {
         let sayfa = motoru_calistir(&baslangic_adresi, 860);
         println!(
-            "Anka Browser v0.2.8 ({}) [{}] -> {}",
+            "Anka Browser v0.2.9 ({}) [{}] -> {}",
             baslangic_adresi,
             sayfa.page_title.as_deref().unwrap_or("Adsız"),
             sayfa.status_message

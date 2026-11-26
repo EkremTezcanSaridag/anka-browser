@@ -49,6 +49,7 @@ const GDK_SCROLL_DOWN: c_int = 1;
 
 // Cairo Yazı ve Görsel Biçim Sabitleri:
 const CAIRO_FONT_SLANT_NORMAL: c_int = 0;
+const CAIRO_FONT_SLANT_ITALIC: c_int = 1;
 const CAIRO_FONT_WEIGHT_NORMAL: c_int = 0;
 const CAIRO_FONT_WEIGHT_BOLD: c_int = 1;
 const CAIRO_FORMAT_ARGB32: c_int = 0;
@@ -576,16 +577,26 @@ unsafe extern "C" fn on_canvas_draw(
         let width = (api.gtk_widget_get_allocated_width)(widget) as c_double;
         let height = (api.gtk_widget_get_allocated_height)(widget) as c_double;
 
-        // 1. Sayfa arka planını bembeyaz boya
-        (api.cairo_set_source_rgb)(cr, 1.0, 1.0, 1.0);
-        (api.cairo_rectangle)(cr, 0.0, 0.0, width, height);
-        (api.cairo_fill)(cr);
-
         let font_family = to_cstr("Sans");
 
         if let Ok(guard) = LINUX_APP.lock()
             && let Some(app) = guard.as_ref()
         {
+            // 1. Sayfanın kendi <body> arka planını (yoksa beyazı) boya
+            let page_bg = app.state.page_bg().unwrap_or(anka_paint::RgbColor {
+                r: 255,
+                g: 255,
+                b: 255,
+            });
+            (api.cairo_set_source_rgb)(
+                cr,
+                page_bg.r as c_double / 255.0,
+                page_bg.g as c_double / 255.0,
+                page_bg.b as c_double / 255.0,
+            );
+            (api.cairo_rectangle)(cr, 0.0, 0.0, width, height);
+            (api.cairo_fill)(cr);
+
             let scroll_y = app.state.scroll_y();
             for komut in app.state.display_list() {
                 let draw_x = (komut.x as c_double) + 8.0;
@@ -697,16 +708,24 @@ unsafe extern "C" fn on_canvas_draw(
                 };
 
                 if !gorsel_cizildi && !render_text.is_empty() {
-                    let weight = if matches!(komut.tag.as_str(), "h1" | "h2" | "h3") {
+                    let weight = if matches!(
+                        komut.tag.as_str(),
+                        "h1" | "h2" | "h3" | "strong" | "b"
+                    ) {
                         CAIRO_FONT_WEIGHT_BOLD
                     } else {
                         CAIRO_FONT_WEIGHT_NORMAL
+                    };
+                    let slant = if matches!(komut.tag.as_str(), "em" | "i") {
+                        CAIRO_FONT_SLANT_ITALIC
+                    } else {
+                        CAIRO_FONT_SLANT_NORMAL
                     };
 
                     (api.cairo_select_font_face)(
                         cr,
                         font_family.as_ptr(),
-                        CAIRO_FONT_SLANT_NORMAL,
+                        slant,
                         weight,
                     );
                     (api.cairo_set_font_size)(cr, komut.font_size as c_double);
@@ -743,6 +762,10 @@ unsafe extern "C" fn on_canvas_draw(
                     }
                 }
             }
+        } else {
+            (api.cairo_set_source_rgb)(cr, 1.0, 1.0, 1.0);
+            (api.cairo_rectangle)(cr, 0.0, 0.0, width, height);
+            (api.cairo_fill)(cr);
         }
     }
     0

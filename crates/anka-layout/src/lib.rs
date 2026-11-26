@@ -6,6 +6,8 @@
 // - CSS Flexbox (`display: flex` ve `gap`): Çocuk kutuları (kartlar, sütunlar) yatayda eşit genişlikle yan yana dizer!
 // - Otomatik satır kaydırma (`wrap_text`), `<li>`, `<hr>`, `<img src alt width height>` ve inline `<a>`/`<span>`
 
+use std::collections::HashMap;
+
 use anka_css::{CssRule, Declaration, parse_css};
 use anka_html::{DomNode, NodeType};
 
@@ -196,6 +198,7 @@ fn resolve_element_style(
             "h1" => 32,
             "h2" => 24,
             "h3" => 20,
+            "small" => 13,
             _ => 16,
         },
         ..Default::default()
@@ -267,9 +270,54 @@ pub fn wrap_text(text: &str, max_width: u32, font_size: u32) -> Vec<String> {
     lines
 }
 
+/// Bir HTML sayfasının `<body>` etiketine uygulanan arka plan rengini (`background-color` / `background`)
+/// CSS kurallarından, satır içi `style="..."` veya `bgcolor="..."` özelliğinden çözer.
+pub fn resolve_body_background(root: &DomNode, rules: &[CssRule]) -> Option<String> {
+    if let Some(body) = find_body_node(root) {
+        let (id, classes, inline) = extract_own_attrs(body);
+        let style = resolve_element_style("body", id.as_deref(), &classes, &inline, rules);
+        if style.bg_color.is_some() {
+            return style.bg_color;
+        }
+        if let Some(bgcolor) = body.get_attribute("bgcolor") {
+            let trimmed = bgcolor.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    let style = resolve_element_style("body", None, &[], &[], rules);
+    style.bg_color
+}
+
+fn find_body_node(node: &DomNode) -> Option<&DomNode> {
+    if let NodeType::Element(tag) = &node.node_type
+        && tag == "body"
+    {
+        return Some(node);
+    }
+    for child in &node.children {
+        if let Some(found) = find_body_node(child) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 /// HTML ağacını (`DomNode`) ve CSS kurallarını (`CssRule`) birleştirerek
 /// her kutunun ekranda duracağı `(x, y, width, height)` koordinatlarını hesaplar.
 pub fn compute_layout(root: &DomNode, rules: &[CssRule], viewport_width: u32) -> Vec<LayoutBox> {
+    compute_layout_with_images(root, rules, viewport_width, &HashMap::new())
+}
+
+/// İndirilmiş görsellerin gerçek piksel boyutlarını (`image_sizes`) da dikkate alarak
+/// yerleşim hesaplar; böylece `width`/`height` yazılmamış `<img>` etiketleri doğal oranını korur!
+pub fn compute_layout_with_images(
+    root: &DomNode,
+    rules: &[CssRule],
+    viewport_width: u32,
+    image_sizes: &HashMap<String, (u32, u32)>,
+) -> Vec<LayoutBox> {
     let mut boxes = Vec::new();
     let mut current_y: u32 = 16;
     let base_x: u32 = 16;
@@ -286,6 +334,7 @@ pub fn compute_layout(root: &DomNode, rules: &[CssRule], viewport_width: u32) ->
         root,
         &initial_ctx,
         rules,
+        image_sizes,
         base_x,
         avail_width,
         &mut current_y,
@@ -302,6 +351,7 @@ fn layout_node(
     node: &DomNode,
     ctx: &NodeContext,
     rules: &[CssRule],
+    image_sizes: &HashMap<String, (u32, u32)>,
     base_x: u32,
     avail_width: u32,
     current_y: &mut u32,
@@ -311,7 +361,25 @@ fn layout_node(
 ) {
     match &node.node_type {
         NodeType::Element(tag_name) => {
-            if matches!(tag_name.as_str(), "head" | "style" | "script" | "title") {
+            if matches!(
+                tag_name.as_str(),
+                "head" | "style" | "script" | "title" | "noscript" | "template"
+            ) {
+                return;
+            }
+            if node.get_attribute("hidden").is_some() {
+                return;
+            }
+
+            // `<br>` etiketi: Açık satırı kapatıp bir alt satıra geç!
+            if tag_name == "br" {
+                if *inline_x > base_x {
+                    *current_y += *last_inline_height + 6;
+                    *inline_x = base_x;
+                    *last_inline_height = 0;
+                } else {
+                    *current_y += 16;
+                }
                 return;
             }
 
@@ -358,16 +426,33 @@ fn layout_node(
                 let alt = node.get_attribute("alt").unwrap_or("").trim();
 
                 let max_img_w = avail_width.max(80);
-                let img_w = node
+                let attr_w = node
                     .get_attribute("width")
-                    .and_then(|w| w.trim_end_matches("px").trim().parse::<u32>().ok())
-                    .unwrap_or(280)
-                    .clamp(48, max_img_w);
-                let img_h = node
+                    .and_then(|w| w.trim_end_matches("px").trim().parse::<u32>().ok());
+                let attr_h = node
                     .get_attribute("height")
-                    .and_then(|h| h.trim_end_matches("px").trim().parse::<u32>().ok())
-                    .unwrap_or(140)
-                    .clamp(36, 420);
+                    .and_then(|h| h.trim_end_matches("px").trim().parse::<u32>().ok());
+
+                let (img_w, img_h) = match (attr_w, attr_h, image_sizes.get(&src)) {
+                    (Some(w), Some(h), _) => (w.clamp(16, max_img_w), h.clamp(16, 480)),
+                    (Some(w), None, Some(&(nat_w, nat_h))) if nat_w > 0 => {
+                        let cw = w.clamp(16, max_img_w);
+                        let ch = ((nat_h as u64 * cw as u64) / nat_w as u64) as u32;
+                        (cw, ch.clamp(16, 480))
+                    }
+                    (None, None, Some(&(nat_w, nat_h))) if nat_w > 0 && nat_h > 0 => {
+                        if nat_w > max_img_w {
+                            let ch = ((nat_h as u64 * max_img_w as u64) / nat_w as u64) as u32;
+                            (max_img_w, ch.clamp(16, 480))
+                        } else {
+                            (nat_w.clamp(16, max_img_w), nat_h.clamp(16, 480))
+                        }
+                    }
+                    _ => (
+                        attr_w.unwrap_or(280).clamp(16, max_img_w),
+                        attr_h.unwrap_or(140).clamp(16, 480),
+                    ),
+                };
 
                 let etiket_yazisi = if !alt.is_empty() {
                     format!("[Gorsel: {alt}]")
@@ -494,14 +579,17 @@ fn layout_node(
             }
 
             // Blok etiketine girerken açıkta kalan yan yana (inline) satırı kapat:
-            let is_inline_tag = matches!(tag_name.as_str(), "a" | "span" | "button" | "b" | "i");
+            let is_inline_tag = matches!(
+                tag_name.as_str(),
+                "a" | "span" | "button" | "b" | "strong" | "i" | "em" | "code" | "small"
+            );
             if !is_inline_tag && *inline_x > base_x {
                 *current_y += *last_inline_height + 12;
                 *inline_x = base_x;
                 *last_inline_height = 0;
             }
 
-            // Elementin kendi doğrudan CSS özelliklerini (`display: flex`, `padding`, `margin`, arka plan) çöz:
+            // Elementin kendi doğrudan CSS özelliklerini (`display: flex`, `display: none`, `padding`, `margin`) çöz:
             let (own_id, own_classes, own_inline) = extract_own_attrs(node);
             let own_style = resolve_element_style(
                 tag_name,
@@ -510,6 +598,9 @@ fn layout_node(
                 &own_inline,
                 rules,
             );
+            if own_style.display == "none" {
+                return;
+            }
 
             // Ebeveyn bağlamını miras alarak çocuklara aktarılacak `next_ctx` oluştur:
             let mut next_ctx = ctx.clone();
@@ -543,9 +634,10 @@ fn layout_node(
             }
 
             // =================================================================
-            // 1. CSS FLEXBOX (`display: flex`) YATAY SÜTUN YERLEŞİMİ!
+            // 1. CSS FLEXBOX (`display: flex`) ve HTML TABLO SATIRI (`<tr>`) YERLEŞİMİ!
             // =================================================================
-            if own_style.display == "flex" {
+            let is_table_row = tag_name == "tr";
+            if own_style.display == "flex" || is_table_row {
                 let flex_items: Vec<&DomNode> = node
                     .children
                     .iter()
@@ -554,7 +646,7 @@ fn layout_node(
 
                 if !flex_items.is_empty() {
                     let count = flex_items.len() as u32;
-                    let gap = own_style.gap;
+                    let gap = if is_table_row { 8 } else { own_style.gap };
                     let total_gaps = gap.saturating_mul(count.saturating_sub(1));
                     let col_width = avail_width.saturating_sub(total_gaps) / count;
                     let start_y = *current_y;
@@ -570,13 +662,17 @@ fn layout_node(
                             item,
                             &next_ctx,
                             rules,
+                            image_sizes,
                             col_x,
-                            col_width.max(80),
+                            col_width.max(50),
                             &mut col_y,
                             &mut col_inline_x,
                             &mut col_inline_h,
                             boxes,
                         );
+                        if col_inline_x > col_x {
+                            col_y += col_inline_h + 6;
+                        }
                         if col_y > max_bottom_y {
                             max_bottom_y = col_y;
                         }
@@ -638,6 +734,7 @@ fn layout_node(
                         child,
                         &next_ctx,
                         rules,
+                        image_sizes,
                         inner_x,
                         inner_w,
                         current_y,
@@ -668,6 +765,7 @@ fn layout_node(
                     child,
                     &next_ctx,
                     rules,
+                    image_sizes,
                     base_x,
                     avail_width,
                     current_y,
@@ -716,12 +814,19 @@ fn layout_node(
             let char_w = ((style.font_size * 64) / 100).max(8);
 
             // YAN YANA (INLINE) DİZİLİM:
-            // Kısa `<a>`, `<span>`, `<button>` öğeleri satıra sığıyorsa yan yana diz!
-            let is_short_inline =
-                matches!(current_tag, "a" | "span" | "button") && text.chars().count() <= 28;
+            // Kısa `<a>`, `<span>`, `<button>`, `<strong>`, `<b>`, `<em>`, `<i>`, `<code>`, `<small>` öğeleri satıra sığıyorsa yan yana diz!
+            let is_short_inline = matches!(
+                current_tag,
+                "a" | "span" | "button" | "strong" | "b" | "em" | "i" | "code" | "small"
+            ) && text.chars().count() <= 28;
 
             if is_short_inline {
-                let item_w = (text.chars().count() as u32 * char_w) + 26 + pad * 2;
+                let extra_w = if matches!(current_tag, "a" | "button") {
+                    26
+                } else {
+                    8
+                };
+                let item_w = (text.chars().count() as u32 * char_w) + extra_w + pad * 2;
                 if *inline_x + item_w > base_x + avail_width && *inline_x > base_x {
                     *current_y += (*last_inline_height).max(line_height) + 10;
                     *inline_x = base_x;
@@ -985,5 +1090,49 @@ mod tests {
         // Metin kutusu ile Gönder butonu aynı satırda yan yana olmalı!
         assert_eq!(kutular[0].y, kutular[1].y);
         assert!(kutular[1].x > kutular[0].x);
+    }
+
+    #[test]
+    fn test_display_none_hidden_br_ve_inline_etiketler() {
+        let html = "<body><div style=\"display: none\"><p>Gizli CSS</p></div><p hidden>Gizli Attr</p><noscript><p>Noscript</p></noscript><p>Satir 1</p><br><small>Kucuk Not</small><strong>Kalın Baslik</strong></body>";
+        let dom = parse_html(html);
+        let kutular = compute_layout(&dom, &[], 800);
+
+        assert!(!kutular.iter().any(|b| b.text.contains("Gizli")));
+        assert!(!kutular.iter().any(|b| b.text.contains("Noscript")));
+        let small = kutular.iter().find(|b| b.tag == "small").expect("small bulunamadi");
+        let strong = kutular.iter().find(|b| b.tag == "strong").expect("strong bulunamadi");
+        assert_eq!(small.font_size, 13);
+        assert!(small.y > kutular[0].y + kutular[0].height);
+        assert_eq!(strong.text, "Kalın Baslik");
+    }
+
+    #[test]
+    fn test_table_tr_td_yatay_yerlesim() {
+        let html = "<body><table><tr><td>Sutun A</td><td>Sutun B</td><td>Sutun C</td></tr></table></body>";
+        let dom = parse_html(html);
+        let kutular = compute_layout(&dom, &[], 800);
+
+        assert_eq!(kutular.len(), 3);
+        assert_eq!(kutular[0].y, kutular[1].y);
+        assert_eq!(kutular[1].y, kutular[2].y);
+        assert!(kutular[1].x > kutular[0].x);
+        assert!(kutular[2].x > kutular[1].x);
+    }
+
+    #[test]
+    fn test_body_arka_plani_ve_orantisal_gorsel_boyutu() {
+        let html = "<body bgcolor=\"#f6f6ef\"><img src=\"/hero.png\" alt=\"Hero\"></body>";
+        let dom = parse_html(html);
+        let bg = resolve_body_background(&dom, &[]);
+        assert_eq!(bg.as_deref(), Some("#f6f6ef"));
+
+        let mut sizes = HashMap::new();
+        sizes.insert("/hero.png".to_string(), (800, 400));
+        let kutular = compute_layout_with_images(&dom, &[], 500, &sizes);
+        assert_eq!(kutular.len(), 1);
+        // 500px viewport -> max_w = 468, oranti 2:1 -> height ~ 234
+        assert!(kutular[0].width <= 468);
+        assert_eq!(kutular[0].height, (kutular[0].width * 400) / 800);
     }
 }
