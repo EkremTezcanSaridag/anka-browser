@@ -90,10 +90,10 @@ Anka'nın çekirdek motoru bir web sayfasını aşağıdaki boru hattı (pipelin
   - [x] `<img src="..." alt="...">` görsel kutu yerleşimi, saf Rust BMP/PPM + Linux `dlopen` `gdk-pixbuf` PNG/JPEG/WebP piksel çözümü ve Cairo/GDI çizimi
   - [x] Yerel dosya protokolü (`file://`), CSS Kutu Modeli (`padding`, `margin`, `text-align`), birleşik kart çerçeveleri ve CSS Flexbox (`display: flex`, `gap`)
   - [x] Gerçek web uyumluluğu (`v0.2.9`–`v0.2.10`): HTML yorum/entity/boolean/ham `<style>`, CSS yorum/at-kural atlama ve soy-çocuk seçiciler (`.menu a`, `div > p`), `var()`/`rgb()`/`rgba()`/saydam renkler, `<body>` arka planı, `display: none`, `<br>`, `<table>`/`<tr>`, `<select>`, Pango çok dilli font & gerçek piksel ölçümü ve orantılı `<img>` çizimi
-- [ ] **Faz 5 — JavaScript, Süreç İzolasyonu ve Güvenlik**
+- [x] **Faz 5 — JavaScript, Süreç İzolasyonu ve Güvenlik**
   - [x] Sıfırdan JavaScript motoru (`crates/anka-js`), canlı DOM API (`document.getElementById(...).innerText`, `style.*`, `document.title`) ve `<button onclick="...">` etkileşimi
   - [x] Yerleşik reklam ve izleyici engelleyici (**Anka Kalkan** `v0.2.11`: reklam/analitik alan adı engelleme, `utm_*`/`fbclid` izleme parametresi temizleme, 1x1 takip pikseli & kozmetik reklam temizliği ve aç/kapat sayacı)
-  - [ ] Çok süreçli (Multi-process) sekme izolasyonu
+  - [x] Çok süreçli (Multi-process) sekme izolasyonu (`v0.3.0`: her sekme ayrı `--renderer-worker` OS sürecinde çalışır; `stdin/stdout` pipe IPC, PID takibi ve çökme kurtarma)
 
 ---
 

@@ -1,6 +1,6 @@
 // Anka Browser - İşletim Sisteminden Bağımsız Ortak Tarayıcı Durumu (BrowserState)
-// Çoklu Sekme (Multi-Tab), Anka Kalkan (Reklam/İzleyici Engelleyici), Kalıcı Yer İmleri,
-// Canlı JS `onclick` ve Etkileşimli HTML `<form>` / `<input>` Yönetimi (v0.2.11)
+// Çok Süreçli (Multi-Process) Sekme İzolasyonu, Anka Kalkan, Kalıcı Yer İmleri,
+// Canlı JS `onclick` ve Etkileşimli HTML `<form>` / `<input>` Yönetimi (v0.3.0)
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -8,9 +8,8 @@ use std::path::PathBuf;
 use anka_paint::PaintCommand;
 use anka_url::Url;
 
-use crate::{
-    LoadedPage, html_motoru_calistir_kalkanli, motoru_calistir_kalkanli, normalize_address,
-};
+use crate::normalize_address;
+use crate::process_ipc::{RenderSnapshot, TabWorkerClient};
 
 /// Kullanıcının web sayfası tuvaline tıkladığında tetiklenebilecek eylem türleri:
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,12 +23,14 @@ pub enum ClickAction {
 }
 
 /// Tek bir tarayıcı sekmesinin (Tab) bağımsız canlı durumunu tutan veri yapısı:
-#[derive(Clone)]
+/// Her sekme kendi izole `--renderer-worker` işçi sürecine (`worker`) sahiptir!
 pub struct TabState {
     /// Bu sekmede açık olan sayfanın tam adresi
     pub current_url: String,
-    /// Bu sekmenin canlı DOM, CSS, Görsel Önbellek ve JavaScript Runtime paketi
-    pub page: LoadedPage,
+    /// İzole işçi süreçten gelen son çizim ve durum anlık görüntüsü
+    pub page: RenderSnapshot,
+    /// Bu sekmeye ait izole OS alt süreci (Renderer Process) istemcisi
+    pub worker: TabWorkerClient,
     /// Bu sekmenin kendi Geri (`<-`) geçmişi yığını
     pub history: Vec<String>,
     /// Bu sekmenin kendi İleri (`->`) geçmişi yığını
@@ -180,12 +181,14 @@ impl BrowserState {
             let (cleaned, _) = anka_net::shield::strip_tracking_params(&temiz_url);
             temiz_url = cleaned;
         }
-        let ilk_sayfa = motoru_calistir_kalkanli(initial_address, viewport_width, shield_enabled);
+        let mut worker = TabWorkerClient::new(!cfg!(test));
+        let ilk_sayfa = worker.load_url(initial_address, viewport_width, shield_enabled);
 
         Self {
             tabs: vec![TabState {
                 current_url: temiz_url,
                 page: ilk_sayfa,
+                worker,
                 history: Vec::new(),
                 forward_history: Vec::new(),
                 scroll_y: 0,
@@ -242,12 +245,19 @@ impl BrowserState {
         } else {
             "☆"
         };
+        let active = self.active();
+        let pid_tag = if active.page.crashed {
+            format!("PID:{} (COKTU)", active.page.pid)
+        } else {
+            format!("PID:{}", active.page.pid)
+        };
         format!(
-            "[Sekme {}/{} | {}] {}",
+            "[Sekme {}/{} | {} | {}] {}",
             self.active_tab + 1,
             self.tabs.len(),
+            pid_tag,
             yildiz,
-            self.active().page.status_message
+            active.page.status_message
         )
     }
 
@@ -262,14 +272,14 @@ impl BrowserState {
     pub fn window_title(&self) -> String {
         let tab_info = format!("[Sekme {}/{}]", self.active_tab + 1, self.tabs.len());
         match &self.active().page.page_title {
-            Some(t) => format!("{t} {tab_info} — Anka Browser v0.2.11"),
-            None => format!("Anka Browser v0.2.11 {tab_info} — Telek Engine"),
+            Some(t) => format!("{t} {tab_info} — Anka Browser v0.3.0"),
+            None => format!("Anka Browser v0.3.0 {tab_info} — Telek Engine"),
         }
     }
 
     pub fn shield_button_label(&self) -> String {
         if self.shield_enabled {
-            let count = self.active().page.shield_stats.total_blocked();
+            let count = self.active().page.shield_blocked;
             if count > 0 {
                 format!("Kalkan: Acik ({count})")
             } else {
@@ -310,11 +320,12 @@ impl BrowserState {
             let (cleaned, _) = anka_net::shield::strip_tracking_params(&clean_url);
             clean_url = cleaned;
         }
-        let sayfa =
-            motoru_calistir_kalkanli(initial_address, self.viewport_width, self.shield_enabled);
+        let mut worker = TabWorkerClient::new(!cfg!(test));
+        let sayfa = worker.load_url(initial_address, self.viewport_width, self.shield_enabled);
         self.tabs.push(TabState {
             current_url: clean_url,
             page: sayfa,
+            worker,
             history: Vec::new(),
             forward_history: Vec::new(),
             scroll_y: 0,
@@ -441,9 +452,13 @@ impl BrowserState {
         let shield_on = self.shield_enabled;
         let loaded = if clean_url == "http://anka.local/yer-imleri" {
             let raw_http = self.build_bookmarks_http_response();
-            html_motoru_calistir_kalkanli(&clean_url, &raw_http, viewport_w, shield_on)
+            self.active_mut()
+                .worker
+                .load_html(&clean_url, &raw_http, viewport_w, shield_on)
         } else {
-            motoru_calistir_kalkanli(raw_address, viewport_w, shield_on)
+            self.active_mut()
+                .worker
+                .load_url(raw_address, viewport_w, shield_on)
         };
 
         let tab = self.active_mut();
@@ -645,7 +660,8 @@ impl BrowserState {
 
         if let Some(js_code) = found_onclick {
             let vw = self.viewport_width;
-            self.active_mut().page.run_inline_js(&js_code, vw);
+            let tab = self.active_mut();
+            tab.page = tab.worker.eval_js(&js_code, vw);
             return ClickAction::Redraw;
         }
 
@@ -831,7 +847,7 @@ mod tests {
         assert!(state.shield_enabled);
 
         // Kalkan açıkken reklam kutusu gizlenmiş, 1x1 piksel + script + ?utm_source/?fbclid engellenmiş olmalı!
-        assert!(state.active().page.shield_stats.total_blocked() >= 5);
+        assert!(state.active().page.shield_blocked >= 5);
         assert!(
             !state
                 .display_list()
@@ -841,12 +857,45 @@ mod tests {
 
         // Kalkanı kapat -> sayfa yenilenir ve reklam kutusu artık görünür hale gelir!
         assert!(!state.toggle_shield());
-        assert_eq!(state.active().page.shield_stats.total_blocked(), 0);
+        assert_eq!(state.active().page.shield_blocked, 0);
         assert!(
             state
                 .display_list()
                 .iter()
                 .any(|b| b.text.contains("REKLAM ALANI"))
         );
+    }
+
+    #[test]
+    fn test_cok_surecli_sekme_cokme_izolasyonu_ve_kurtarma() {
+        let mut state = BrowserState::new("http://anka.local/hosgeldiniz", 860);
+        state.new_tab("http://anka.local/sayfa2");
+        assert_eq!(state.tabs.len(), 2);
+
+        // 2. sekmede çökme testi tetiklenince sadece 2. sekme çökmeli!
+        state.navigate("http://anka.local/cokme-testi", true);
+        assert!(state.active().page.crashed);
+        assert!(
+            state
+                .display_list()
+                .iter()
+                .any(|b| b.text.contains("Coktu"))
+        );
+
+        // 1. sekmeye geç: Hiç etkilenmemiş ve canlı olmalı!
+        assert!(state.switch_tab(0));
+        assert!(!state.active().page.crashed);
+        assert!(
+            state
+                .display_list()
+                .iter()
+                .any(|b| b.text.contains("Anka JS Hazir!"))
+        );
+
+        // Tekrar 2. sekmeye dönüp yeni bir adres açınca yeni işçi ile sekme kurtarılmalı!
+        assert!(state.switch_tab(1));
+        state.navigate("http://anka.local/hosgeldiniz", false);
+        assert!(!state.active().page.crashed);
+        assert!(state.active().page.pid > 0);
     }
 }

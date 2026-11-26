@@ -19,6 +19,8 @@ use anka_url::Url;
 #[cfg(any(windows, target_os = "linux", test))]
 mod browser_state;
 
+mod process_ipc;
+
 #[cfg(windows)]
 mod win32_gui;
 
@@ -121,7 +123,7 @@ impl LoadedPage {
         };
 
         self.status_message = format!(
-            "{} {} | {} bayt | {} kutu | Telek Engine v0.2.11{}{}",
+            "{} {} | {} bayt | {} kutu | Telek Engine v0.3.0{}{}",
             protokol_etiketi,
             self.status_code,
             self.body_len,
@@ -409,12 +411,13 @@ pub fn motoru_calistir_kalkanli(
                 ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; padding: 10px; font-size: 15px; }",
                 "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; padding: 10px; font-size: 15px; }",
                 "</style></head><body>",
-                "<h1>Anka Browser v0.2.11 — Anka Kalkan (Reklam &amp; Izleyici Engelleyici)!</h1>",
+                "<h1>Anka Browser v0.3.0 — Cok Surecli Sekme Izolasyonu + Anka Kalkan!</h1>",
                 "<nav>",
                 "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
                 "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
                 "<a class=\"pill\" href=\"http://anka.local/yer-imleri\">Kalici Yer Imlerim</a>",
                 "<a class=\"pill\" href=\"http://anka.local/kalkan\">Kalkan Testi</a>",
+                "<a class=\"pill\" href=\"http://anka.local/cokme-testi\">Cokme Testi</a>",
                 "<a class=\"pill\" href=\"https://tr.wikipedia.org\">Vikipedi TR</a>",
                 "</nav>",
                 "<hr>",
@@ -493,9 +496,15 @@ pub fn motoru_calistir_kalkanli(
 }
 
 fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--renderer-worker") {
+        process_ipc::run_renderer_worker_stdio();
+        return;
+    }
+
     let mut headless = false;
     let mut baslangic_adresi: Option<String> = None;
-    for arg in std::env::args().skip(1) {
+    for arg in args {
         if arg == "--headless" {
             headless = true;
         } else if baslangic_adresi.is_none() {
@@ -525,7 +534,7 @@ fn main() {
     // Ekransız (Headless / `--headless` / CI) ortamda terminal önizlemesi çalışır
     let sayfa = motoru_calistir(&baslangic_adresi, 860);
     println!(
-        "Anka Browser v0.2.11 ({}) [{}] | page_bg={:?} -> {}",
+        "Anka Browser v0.3.0 ({}) [{}] | page_bg={:?} -> {}",
         baslangic_adresi,
         sayfa.page_title.as_deref().unwrap_or("Adsız"),
         sayfa.page_bg,
