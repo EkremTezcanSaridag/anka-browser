@@ -346,47 +346,58 @@ pub fn motoru_calistir(hedef_adres: &str, viewport_width: u32) -> LoadedPage {
 }
 
 fn main() {
-    let baslangic_adresi = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "http://anka.local/hosgeldiniz".to_string());
-
-    // Windows'ta doğrudan gerçek yerel masaüstü penceresini (Win32 GDI) aç!
-    #[cfg(windows)]
-    {
-        win32_gui::pencereyi_baslat(&baslangic_adresi);
-        return;
+    let mut headless = false;
+    let mut baslangic_adresi: Option<String> = None;
+    for arg in std::env::args().skip(1) {
+        if arg == "--headless" {
+            headless = true;
+        } else if baslangic_adresi.is_none() {
+            baslangic_adresi = Some(arg);
+        }
     }
+    let baslangic_adresi =
+        baslangic_adresi.unwrap_or_else(|| "http://anka.local/hosgeldiniz".to_string());
 
-    // Linux'ta (Milis, Ubuntu, Fedora, Arch vb.) masaüstü ekranı varsa yerel GTK3 + Cairo penceresini aç!
-    #[cfg(target_os = "linux")]
-    {
-        if linux_gui::pencereyi_baslat(&baslangic_adresi) {
+    if !headless {
+        // Windows'ta doğrudan gerçek yerel masaüstü penceresini (Win32 GDI) aç!
+        #[cfg(windows)]
+        {
+            win32_gui::pencereyi_baslat(&baslangic_adresi);
             return;
         }
+
+        // Linux'ta (Milis, Ubuntu, Fedora, Arch vb.) masaüstü ekranı varsa yerel GTK3 + Cairo penceresini aç!
+        #[cfg(target_os = "linux")]
+        {
+            if linux_gui::pencereyi_baslat(&baslangic_adresi) {
+                return;
+            }
+        }
     }
 
-    // Ekransız (Headless / CI) ortamda veya diğer platformlarda terminal önizlemesi çalışır
-    #[cfg(not(windows))]
-    {
-        let sayfa = motoru_calistir(&baslangic_adresi, 860);
+    // Ekransız (Headless / `--headless` / CI) ortamda terminal önizlemesi çalışır
+    let sayfa = motoru_calistir(&baslangic_adresi, 860);
+    println!(
+        "Anka Browser v0.2.9 ({}) [{}] | page_bg={:?} -> {}",
+        baslangic_adresi,
+        sayfa.page_title.as_deref().unwrap_or("Adsız"),
+        sayfa.page_bg,
+        sayfa.status_message
+    );
+    for komut in &sayfa.display_list {
         println!(
-            "Anka Browser v0.2.9 ({}) [{}] -> {}",
-            baslangic_adresi,
-            sayfa.page_title.as_deref().unwrap_or("Adsız"),
-            sayfa.status_message
+            "[x:{:>2}, y:{:>3}, w:{:>3}, h:{:>3} | {:>2}px | fg({:>3},{:>3},{:>3}) bg({:?})] <{}> {}",
+            komut.x,
+            komut.y,
+            komut.width,
+            komut.height,
+            komut.font_size,
+            komut.color.r,
+            komut.color.g,
+            komut.color.b,
+            komut.bg_color,
+            komut.tag,
+            komut.text
         );
-        for komut in &sayfa.display_list {
-            println!(
-                "[x:{:>2}, y:{:>3} | {:>2}px | RGB({:>3},{:>3},{:>3})] <{}> {}",
-                komut.x,
-                komut.y,
-                komut.font_size,
-                komut.color.r,
-                komut.color.g,
-                komut.color.b,
-                komut.tag,
-                komut.text
-            );
-        }
     }
 }

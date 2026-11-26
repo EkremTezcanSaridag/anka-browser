@@ -20,13 +20,54 @@ impl RgbColor {
         Self::try_from_css(name).unwrap_or(RgbColor { r: 0, g: 0, b: 0 })
     }
 
-    /// CSS renk ifadesini çözer; `transparent` veya `rgba(..., 0)` ise `None` döndürür.
+    /// CSS renk ifadesini çözer; `transparent`, `none`, `rgba(..., 0)` veya
+    /// çözülemeyen karmaşık ifadeler (örn: `linear-gradient(...)`) için `None` döndürür.
+    /// Böylece bilinmeyen arka plan değerleri yanlışlıkla simsiyah boyanmaz!
     pub fn try_from_css(name: &str) -> Option<Self> {
-        let temiz = name.trim().to_lowercase();
-        if temiz.is_empty() || temiz == "transparent" || temiz == "none" || temiz == "inherit" {
+        Self::try_from_css_inner(name, 0)
+    }
+
+    fn try_from_css_inner(name: &str, depth: usize) -> Option<Self> {
+        if depth > 4 {
+            return None;
+        }
+        let mut temiz = name.trim().to_lowercase();
+        if let Some(stripped) = temiz.strip_suffix("!important") {
+            temiz = stripped.trim().to_string();
+        }
+        if temiz.is_empty()
+            || matches!(
+                temiz.as_str(),
+                "transparent" | "none" | "inherit" | "initial" | "unset" | "currentcolor"
+            )
+        {
             return None;
         }
 
+        // `var(--ozellik, yedek_renk)` ifadelerinden yedek (fallback) rengi çıkar
+        if let Some(inner) = temiz.strip_prefix("var(").and_then(|s| s.strip_suffix(')'))
+            && let Some((_, fallback)) = inner.split_once(',')
+        {
+            return Self::try_from_css_inner(fallback, depth + 1);
+        }
+
+        if let Some(tek_renk) = Self::parse_single_color(&temiz) {
+            return Some(tek_renk);
+        }
+
+        // `background: url(/bg.png) no-repeat #f8f9fa` gibi çok parçalı shorthand ifadelerden rengi bul
+        if temiz.contains(char::is_whitespace) && !temiz.starts_with("rgb") {
+            for token in temiz.split_whitespace() {
+                if let Some(c) = Self::parse_single_color(token) {
+                    return Some(c);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn parse_single_color(temiz: &str) -> Option<Self> {
         // 1. DURUM: `#hex` (6 haneli, 8 haneli veya 3 haneli)
         if let Some(hex) = temiz.strip_prefix('#') {
             if (hex.len() == 6 || hex.len() == 8)
@@ -56,13 +97,16 @@ impl RgbColor {
             }
         }
 
-        // 2. DURUM: `rgb(r, g, b)` veya `rgba(r, g, b, a)`
+        // 2. DURUM: `rgb(r, g, b)`, `rgba(r, g, b, a)` veya `rgb(r g b / a)`
         if let Some(inner) = temiz
             .strip_prefix("rgba(")
             .or_else(|| temiz.strip_prefix("rgb("))
             .and_then(|s| s.strip_suffix(')'))
         {
-            let parts: Vec<&str> = inner.split([',', ' ']).filter(|p| !p.is_empty()).collect();
+            let parts: Vec<&str> = inner
+                .split([',', ' ', '/'])
+                .filter(|p| !p.is_empty())
+                .collect();
             if parts.len() >= 3
                 && let (Ok(r), Ok(g), Ok(b)) = (
                     parts[0].trim().parse::<u8>(),
@@ -70,15 +114,20 @@ impl RgbColor {
                     parts[2].trim().parse::<u8>(),
                 )
             {
-                if parts.len() >= 4 && parts[3].trim().parse::<f32>().ok() == Some(0.0) {
-                    return None;
+                if parts.len() >= 4 {
+                    let alpha_str = parts[3].trim().trim_end_matches('%');
+                    if let Ok(a) = alpha_str.parse::<f32>()
+                        && a <= 0.0
+                    {
+                        return None;
+                    }
                 }
                 return Some(RgbColor { r, g, b });
             }
         }
 
-        // 3. DURUM: Standart CSS İngilizce renk adları
-        let c = match temiz.as_str() {
+        // 3. DURUM: Standart CSS İngilizce renk adları (bilinmeyen ifade kesinlikle `None` döner!)
+        let c = match temiz {
             "red" => RgbColor { r: 220, g: 38, b: 38 },
             "crimson" => RgbColor { r: 220, g: 20, b: 60 },
             "blue" => RgbColor { r: 37, g: 99, b: 235 },
@@ -110,7 +159,7 @@ impl RgbColor {
             "darkgray" | "darkgrey" => RgbColor { r: 64, g: 64, b: 64 },
             "slategray" | "slategrey" => RgbColor { r: 112, g: 128, b: 144 },
             "black" => RgbColor { r: 0, g: 0, b: 0 },
-            _ => RgbColor { r: 0, g: 0, b: 0 },
+            _ => return None,
         };
         Some(c)
     }
@@ -675,6 +724,23 @@ mod tests {
         );
         assert_eq!(RgbColor::try_from_css("transparent"), None);
         assert_eq!(RgbColor::try_from_css("rgba(0, 0, 0, 0)"), None);
+        assert_eq!(RgbColor::try_from_css("linear-gradient(#fff, #000)"), None);
+        assert_eq!(
+            RgbColor::try_from_css("var(--background-color-base, #ffffff)"),
+            Some(RgbColor {
+                r: 255,
+                g: 255,
+                b: 255
+            })
+        );
+        assert_eq!(
+            RgbColor::try_from_css("url(/logo.png) no-repeat #f8f9fa !important"),
+            Some(RgbColor {
+                r: 248,
+                g: 249,
+                b: 250
+            })
+        );
     }
 
     #[test]

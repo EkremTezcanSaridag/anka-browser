@@ -755,7 +755,10 @@ unsafe extern "C" fn on_canvas_draw(
                     let c_text = to_cstr(&render_text);
                     (api.cairo_show_text)(cr, c_text.as_ptr());
 
-                    if komut.tag == "a" {
+                    if komut.tag == "a"
+                        || (komut.href.is_some()
+                            && !matches!(komut.tag.as_str(), "img" | "button" | "input" | "select"))
+                    {
                         (api.cairo_set_line_width)(cr, 1.0);
                         (api.cairo_rectangle)(cr, text_x, baseline_y + 2.0, approx_text_w, 1.0);
                         (api.cairo_fill)(cr);

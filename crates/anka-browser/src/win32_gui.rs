@@ -847,7 +847,16 @@ unsafe extern "system" fn wnd_proc(
                         } else {
                             0
                         };
-                        let underline = if komut.tag == "a" { 1 } else { 0 };
+                        let underline = if komut.tag == "a"
+                            || (komut.href.is_some()
+                                && !matches!(
+                                    komut.tag.as_str(),
+                                    "img" | "button" | "input" | "select"
+                                )) {
+                            1
+                        } else {
+                            0
+                        };
 
                         let font = CreateFontW(
                             -(komut.font_size as i32),

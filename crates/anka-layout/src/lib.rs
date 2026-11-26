@@ -156,8 +156,24 @@ fn parse_px(val: &str) -> Option<u32> {
 /// Tek bir CSS bildirimini (`Declaration`) `ResolvedStyle` yapısına uygular.
 fn apply_declaration(decl: &Declaration, style: &mut ResolvedStyle) {
     match decl.property.as_str() {
-        "color" => style.color = decl.value.clone(),
-        "background-color" | "background" => style.bg_color = Some(decl.value.clone()),
+        "color" => {
+            let trimmed = decl.value.trim();
+            let lower = trimmed.to_lowercase();
+            let clean = lower.strip_suffix("!important").unwrap_or(&lower).trim();
+            if !matches!(clean, "inherit" | "initial" | "unset" | "currentcolor") {
+                style.color = trimmed.to_string();
+            }
+        }
+        "background-color" | "background" => {
+            let trimmed = decl.value.trim();
+            let lower = trimmed.to_lowercase();
+            let clean = lower.strip_suffix("!important").unwrap_or(&lower).trim();
+            if matches!(clean, "transparent" | "none" | "initial" | "unset") {
+                style.bg_color = None;
+            } else {
+                style.bg_color = Some(trimmed.to_string());
+            }
+        }
         "border" | "border-color" => style.border_color = extract_border_color(&decl.value),
         "font-size" => {
             if let Some(px) = parse_px(&decl.value) {
@@ -346,6 +362,24 @@ pub fn compute_layout_with_images(
     boxes
 }
 
+fn find_option_label(node: &DomNode, selected_only: bool) -> Option<String> {
+    if let NodeType::Element(tag) = &node.node_type
+        && tag == "option"
+    {
+        let text = node.get_text().trim().to_string();
+        if !text.is_empty() && (!selected_only || node.get_attribute("selected").is_some()) {
+            return Some(text);
+        }
+        return None;
+    }
+    for child in &node.children {
+        if let Some(found) = find_option_label(child, selected_only) {
+            return Some(found);
+        }
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 fn layout_node(
     node: &DomNode,
@@ -363,11 +397,52 @@ fn layout_node(
         NodeType::Element(tag_name) => {
             if matches!(
                 tag_name.as_str(),
-                "head" | "style" | "script" | "title" | "noscript" | "template"
+                "head" | "style" | "script" | "title" | "noscript" | "template" | "datalist" | "option"
             ) {
                 return;
             }
             if node.get_attribute("hidden").is_some() {
+                return;
+            }
+
+            // `<select>` açılır kutusu: Yüzlerce `<option>`'ı sayfaya dökmek yerine tek satırlık seçim kutusu çiz!
+            if tag_name == "select" {
+                let raw_label = find_option_label(node, true)
+                    .or_else(|| find_option_label(node, false))
+                    .unwrap_or_else(|| "Sec".to_string());
+                let short: String = raw_label.chars().take(16).collect();
+                let label = format!("{short} ▾");
+                let box_h = 30u32;
+                let box_w = ((label.chars().count() as u32) * 9 + 22).clamp(68, 190);
+
+                if *inline_x + box_w > base_x + avail_width && *inline_x > base_x {
+                    *current_y += (*last_inline_height).max(box_h) + 10;
+                    *inline_x = base_x;
+                }
+
+                boxes.push(LayoutBox {
+                    tag: "select".to_string(),
+                    text: label,
+                    x: *inline_x,
+                    y: *current_y,
+                    width: box_w,
+                    height: box_h,
+                    color: "#0f172a".to_string(),
+                    bg_color: Some("#f8fafc".to_string()),
+                    border_color: Some("#94a3b8".to_string()),
+                    font_size: 14,
+                    padding: 4,
+                    text_align: "left".to_string(),
+                    href: None,
+                    image_src: None,
+                    onclick: None,
+                    input_name: None,
+                    form_action: None,
+                    is_submit: false,
+                });
+
+                *inline_x += box_w + 10;
+                *last_inline_height = (*last_inline_height).max(box_h);
                 return;
             }
 
@@ -795,6 +870,10 @@ fn layout_node(
                 rules,
             );
 
+            if ctx.href.is_some() && style.color == "black" {
+                style.color = "#1d4ed8".to_string();
+            }
+
             if style.text_align == "left"
                 && let Some(parent_align) = &ctx.text_align
             {
@@ -1134,5 +1213,19 @@ mod tests {
         // 500px viewport -> max_w = 468, oranti 2:1 -> height ~ 234
         assert!(kutular[0].width <= 468);
         assert_eq!(kutular[0].height, (kutular[0].width * 400) / 800);
+    }
+
+    #[test]
+    fn test_select_option_ve_link_alt_etiket_rengi() {
+        let html = "<body><select><option>Turkce</option><option selected>English</option></select><a href=\"/en\"><strong>English</strong></a></body>";
+        let dom = parse_html(html);
+        let kutular = compute_layout(&dom, &[], 800);
+
+        assert_eq!(kutular.len(), 2);
+        assert_eq!(kutular[0].tag, "select");
+        assert!(kutular[0].text.starts_with("English"));
+        assert_eq!(kutular[1].tag, "strong");
+        assert_eq!(kutular[1].href.as_deref(), Some("/en"));
+        assert_eq!(kutular[1].color, "#1d4ed8");
     }
 }
