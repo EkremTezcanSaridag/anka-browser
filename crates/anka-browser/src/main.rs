@@ -99,7 +99,7 @@ impl LoadedPage {
         };
 
         self.status_message = format!(
-            "{} {} | {} bayt | {} kutu | Telek Engine v0.2.7{}",
+            "{} {} | {} bayt | {} kutu | Telek Engine v0.2.8{}",
             protokol_etiketi,
             self.status_code,
             self.body_len,
@@ -271,16 +271,20 @@ pub fn motoru_calistir(hedef_adres: &str, viewport_width: u32) -> LoadedPage {
             ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; padding: 10px; font-size: 15px; }",
             "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; padding: 10px; font-size: 15px; }",
             "</style></head><body>",
-            "<h1>Anka Browser v0.2.7 — Telek Engine + Anka JS!</h1>",
+            "<h1>Anka Browser v0.2.8 — Telek Engine + Anka JS + Web Formlari!</h1>",
             "<nav>",
             "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
             "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
-            "<a class=\"pill\" href=\"http://anka.local/yer-imleri\">Yer Imlerim</a>",
+            "<a class=\"pill\" href=\"http://anka.local/yer-imleri\">Kalici Yer Imlerim</a>",
             "<a class=\"pill\" href=\"https://tr.wikipedia.org\">Vikipedi TR</a>",
             "</nav>",
             "<hr>",
+            "<form action=\"https://tr.wikipedia.org/w/index.php\">",
+            "<input type=\"text\" name=\"search\" placeholder=\"Vikipedi TR'de aramak icin tiklayip yazin...\">",
+            "<input type=\"submit\" value=\"Vikipedi Ara\">",
+            "</form>",
             "<img src=\"http://anka.local/anka-logo.bmp\" alt=\"Anka Telek Engine Piksel Amblemi\" width=\"380\" height=\"110\">",
-            "<h2>7. Istasyon: Sifirdan JavaScript Motoru (anka-js) Canli Testi!</h2>",
+            "<h2>7. Istasyon (Anka JS), GZIP Acici, Kalici Yer Imleri ve Canli Formlar!</h2>",
             "<div class=\"satir\">",
             "<div class=\"kart\">",
             "<p id=\"js_sayac\">Yukleniyor...</p>",
@@ -355,7 +359,7 @@ fn main() {
     {
         let sayfa = motoru_calistir(&baslangic_adresi, 860);
         println!(
-            "Anka Browser v0.2.7 ({}) [{}] -> {}",
+            "Anka Browser v0.2.8 ({}) [{}] -> {}",
             baslangic_adresi,
             sayfa.page_title.as_deref().unwrap_or("Adsız"),
             sayfa.status_message

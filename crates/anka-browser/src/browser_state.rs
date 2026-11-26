@@ -1,5 +1,9 @@
 // Anka Browser - İşletim Sisteminden Bağımsız Ortak Tarayıcı Durumu (BrowserState)
-// Çoklu Sekme (Multi-Tab), Yer İmleri (Bookmarks) ve Canlı JavaScript `onclick` Etkileşimi (v0.2.7)
+// Çoklu Sekme (Multi-Tab), Kalıcı Yer İmleri (Diske Kayıt), Canlı JS `onclick`
+// ve Etkileşimli HTML `<form>` / `<input>` Arama Kutusu Yönetimi (v0.2.8)
+
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use anka_paint::PaintCommand;
 use anka_url::Url;
@@ -9,10 +13,10 @@ use crate::{LoadedPage, html_motoru_calistir, motoru_calistir, normalize_address
 /// Kullanıcının web sayfası tuvaline tıkladığında tetiklenebilecek eylem türleri:
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClickAction {
-    /// Bir `<a href="...">` linkine tıklandı -> yeni adrese git!
+    /// Bir `<a href="...">` linkine veya `<form>` gönder butonuna tıklandı -> yeni adrese git!
     Navigate(String),
-    /// Bir `<button onclick="...">` butonuna tıklandı -> JavaScript canlı çalıştı ve ekran yeniden çizilmeli!
-    JsUpdated,
+    /// Bir `<button onclick="...">` butonuna veya `<input>` kutusuna tıklandı -> ekran yeniden çizilmeli!
+    Redraw,
     /// Boş bir yere tıklandı
     None,
 }
@@ -30,6 +34,10 @@ pub struct TabState {
     pub forward_history: Vec<String>,
     /// Bu sekmenin dikey kaydırma miktarı (piksel)
     pub scroll_y: i32,
+    /// Şu an klavye odağında (focus) olan `<input name="...">` alanının adı (varsa)
+    pub focused_input: Option<String>,
+    /// Bu sekmedeki `<input name="...">` kutularına kullanıcının yazdığı metinler
+    pub input_values: HashMap<String, String>,
 }
 
 /// Kullanıcının kaydettiği tek bir Yer İmi (Bookmark) kaydı:
@@ -40,35 +48,127 @@ pub struct Bookmark {
 }
 
 /// Tüm açık sekmeleri (`tabs`), aktif sekme indeksini (`active_tab`) ve
-/// yer imlerini (`bookmarks`) yöneten ana tarayıcı durumu:
+/// diskte kalıcı olarak saklanan yer imlerini (`bookmarks`) yöneten ana tarayıcı durumu:
 pub struct BrowserState {
-    /// Açık olan tüm sekmelerin listesi (En az 1 sekme her zaman açıktır)
     pub tabs: Vec<TabState>,
-    /// Şu an ekranda görünen aktif sekmenin `tabs` içindeki sırası (`0..tabs.len()`)
     pub active_tab: usize,
-    /// Kullanıcının kaydettiği yer imleri listesi
     pub bookmarks: Vec<Bookmark>,
-    /// Çizim alanının (Viewport) genişliği (piksel)
     pub viewport_width: u32,
+    /// Yer imlerinin kaydedileceği dosya yolu (`None` ise disk kaydı yapılmaz — test izolasyonu için)
+    bookmarks_file: Option<PathBuf>,
+}
+
+/// İşletim sistemine uygun standart kalıcı ayar dosyası yolunu döndürür:
+/// - Linux/Unix: `~/.config/anka-browser/bookmarks.tsv`
+/// - Windows: `%APPDATA%\anka-browser\bookmarks.tsv`
+pub fn default_bookmarks_path() -> Option<PathBuf> {
+    if let Ok(appdata) = std::env::var("APPDATA")
+        && !appdata.trim().is_empty()
+    {
+        return Some(PathBuf::from(appdata).join("anka-browser").join("bookmarks.tsv"));
+    }
+    if let Ok(home) = std::env::var("HOME")
+        && !home.trim().is_empty()
+    {
+        return Some(
+            PathBuf::from(home)
+                .join(".config")
+                .join("anka-browser")
+                .join("bookmarks.tsv"),
+        );
+    }
+    None
+}
+
+/// Yer imlerini basit, insan tarafından okunabilir TSV (`baslik\turl`) metnine dönüştürür.
+pub fn serialize_bookmarks(bookmarks: &[Bookmark]) -> String {
+    let mut out = String::new();
+    for bm in bookmarks {
+        let clean_title = bm.title.replace(['\t', '\r', '\n'], " ");
+        let clean_url = bm.url.replace(['\t', '\r', '\n'], "");
+        out.push_str(&format!("{clean_title}\t{clean_url}\n"));
+    }
+    out
+}
+
+/// Diskten okunan TSV metnini `Vec<Bookmark>` listesine dönüştürür.
+pub fn deserialize_bookmarks(raw: &str) -> Vec<Bookmark> {
+    let mut list = Vec::new();
+    for line in raw.lines() {
+        if let Some((title, url)) = line.split_once('\t') {
+            let t = title.trim();
+            let u = url.trim();
+            if !u.is_empty() {
+                list.push(Bookmark {
+                    title: if t.is_empty() { u.to_string() } else { t.to_string() },
+                    url: u.to_string(),
+                });
+            }
+        }
+    }
+    list
+}
+
+/// Form gönderiminde arama metnindeki boşluk ve özel karakterleri URL güvenli biçime çevirir:
+/// Örn: `"anka kusu"` -> `"anka+kusu"`
+pub fn percent_encode_query(input: &str) -> String {
+    let mut out = String::new();
+    for b in input.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+fn default_bookmarks() -> Vec<Bookmark> {
+    vec![
+        Bookmark {
+            title: "Anka Ana Sayfa".to_string(),
+            url: "http://anka.local/hosgeldiniz".to_string(),
+        },
+        Bookmark {
+            title: "HTTPS Example.com".to_string(),
+            url: "https://example.com".to_string(),
+        },
+        Bookmark {
+            title: "CERN (1991 İlk Web Sitesi)".to_string(),
+            url: "http://info.cern.ch".to_string(),
+        },
+        Bookmark {
+            title: "Vikipedi Türkçe".to_string(),
+            url: "https://tr.wikipedia.org/wiki/Anasayfa".to_string(),
+        },
+    ]
 }
 
 impl BrowserState {
-    /// Başlangıç adresi ve pencere genişliği ile ilk sekmeyi ve varsayılan yer imlerini oluşturur.
+    /// Başlangıç adresi ve pencere genişliği ile ilk sekmeyi ve diskteki kalıcı yer imlerini yükler.
     pub fn new(initial_address: &str, viewport_width: u32) -> Self {
-        let varsayilan_yer_imleri = vec![
-            Bookmark {
-                title: "Anka Ana Sayfa".to_string(),
-                url: "http://anka.local/hosgeldiniz".to_string(),
-            },
-            Bookmark {
-                title: "HTTPS Example.com".to_string(),
-                url: "https://example.com".to_string(),
-            },
-            Bookmark {
-                title: "CERN (1991 İlk Web Sitesi)".to_string(),
-                url: "http://info.cern.ch".to_string(),
-            },
-        ];
+        let storage_path = if cfg!(test) {
+            None
+        } else {
+            default_bookmarks_path()
+        };
+        Self::with_bookmarks_path(initial_address, viewport_width, storage_path)
+    }
+
+    /// Belirli bir yer imi dosya yoluyla (gerçek disk veya test geçici dosyası) `BrowserState` başlatır.
+    pub fn with_bookmarks_path(
+        initial_address: &str,
+        viewport_width: u32,
+        bookmarks_file: Option<PathBuf>,
+    ) -> Self {
+        let bookmarks = bookmarks_file
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|raw| deserialize_bookmarks(&raw))
+            .filter(|list| !list.is_empty())
+            .unwrap_or_else(default_bookmarks);
 
         let ilk_sayfa = motoru_calistir(initial_address, viewport_width);
         let temiz_url = normalize_address(initial_address);
@@ -80,34 +180,52 @@ impl BrowserState {
                 history: Vec::new(),
                 forward_history: Vec::new(),
                 scroll_y: 0,
+                focused_input: None,
+                input_values: HashMap::new(),
             }],
             active_tab: 0,
-            bookmarks: varsayilan_yer_imleri,
+            bookmarks,
             viewport_width,
+            bookmarks_file,
         }
     }
 
-    /// Şu an aktif olan sekmenin (`TabState`) salt-okunur referansını döndürür.
+    /// Güncel yer imlerini diskteki `bookmarks.tsv` dosyasına kalıcı olarak yazar.
+    fn persist_bookmarks(&self) {
+        if let Some(path) = &self.bookmarks_file {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let content = serialize_bookmarks(&self.bookmarks);
+            let _ = std::fs::write(path, content);
+        }
+    }
+
     pub fn active(&self) -> &TabState {
         &self.tabs[self.active_tab]
     }
 
-    /// Şu an aktif olan sekmenin (`TabState`) değiştirilebilir referansını döndürür.
     fn active_mut(&mut self) -> &mut TabState {
         &mut self.tabs[self.active_tab]
     }
 
-    /// Aktif sekmenin URL'sini döndürür.
     pub fn current_url(&self) -> &str {
         &self.active().current_url
     }
 
-    /// Aktif sekmenin kaydırma (`scroll_y`) konumunu döndürür.
     pub fn scroll_y(&self) -> i32 {
         self.active().scroll_y
     }
 
-    /// Aktif sekmenin durum çubuğu mesajını (sekme ve yer imi bilgisiyle birlikte) döndürür.
+    pub fn focused_input(&self) -> Option<&str> {
+        self.active().focused_input.as_deref()
+    }
+
+    /// Bir `<input>` kutusunun ekranda gösterilecek canlı değerini döndürür.
+    pub fn input_value(&self, name: &str) -> Option<&str> {
+        self.active().input_values.get(name).map(String::as_str)
+    }
+
     pub fn status_message(&self) -> String {
         let yildiz = if self.is_current_bookmarked() {
             "★ Yer Imi"
@@ -123,21 +241,18 @@ impl BrowserState {
         )
     }
 
-    /// Aktif sekmenin çizim listesini döndürür.
     pub fn display_list(&self) -> &[PaintCommand] {
         &self.active().page.display_list
     }
 
-    /// Pencere başlığında gösterilecek metni üretir.
     pub fn window_title(&self) -> String {
         let tab_info = format!("[Sekme {}/{}]", self.active_tab + 1, self.tabs.len());
         match &self.active().page.page_title {
-            Some(t) => format!("{t} {tab_info} — Anka Browser v0.2.7"),
-            None => format!("Anka Browser v0.2.7 {tab_info} — Telek Engine"),
+            Some(t) => format!("{t} {tab_info} — Anka Browser v0.2.8"),
+            None => format!("Anka Browser v0.2.8 {tab_info} — Telek Engine"),
         }
     }
 
-    /// Sekme çubuğundaki `index` numaralı sekme butonunun üzerinde yazacak kısa etiketi üretir.
     pub fn tab_label(&self, index: usize) -> String {
         let Some(tab) = self.tabs.get(index) else {
             return format!("Sekme {}", index + 1);
@@ -155,7 +270,6 @@ impl BrowserState {
         }
     }
 
-    /// Yeni bir sekme (`+ Sekme`) açar, o sekmeyi aktif yapar ve verilen adresi yükler.
     pub fn new_tab(&mut self, initial_address: &str) -> usize {
         let sayfa = motoru_calistir(initial_address, self.viewport_width);
         self.tabs.push(TabState {
@@ -164,12 +278,13 @@ impl BrowserState {
             history: Vec::new(),
             forward_history: Vec::new(),
             scroll_y: 0,
+            focused_input: None,
+            input_values: HashMap::new(),
         });
         self.active_tab = self.tabs.len() - 1;
         self.active_tab
     }
 
-    /// Verilen `index` numaralı sekmeye geçiş yapar.
     pub fn switch_tab(&mut self, index: usize) -> bool {
         if index < self.tabs.len() {
             self.active_tab = index;
@@ -179,7 +294,6 @@ impl BrowserState {
         }
     }
 
-    /// Aktif sekmeyi kapatır (`x Kapat`).
     pub fn close_active_tab(&mut self) {
         if self.tabs.len() <= 1 {
             self.navigate("http://anka.local/hosgeldiniz", false);
@@ -191,20 +305,19 @@ impl BrowserState {
         }
     }
 
-    /// Şu an açık olan sayfa yer imlerinde (`bookmarks`) kayıtlı mı?
     pub fn is_current_bookmarked(&self) -> bool {
         let current = self.current_url();
         self.bookmarks.iter().any(|b| b.url == current)
     }
 
-    /// Aktif sayfayı Yer İmlerine ekler veya zaten kayıtlıysa Yer İmlerinden çıkarır.
+    /// Aktif sayfayı Yer İmlerine ekler/çıkarır ve değişikliği ANINDA diske kaydeder!
     pub fn toggle_bookmark(&mut self) -> bool {
         let current = self.current_url().to_string();
         if current.is_empty() || current == "http://anka.local/yer-imleri" {
             return false;
         }
 
-        if let Some(pos) = self.bookmarks.iter().position(|b| b.url == current) {
+        let added = if let Some(pos) = self.bookmarks.iter().position(|b| b.url == current) {
             self.bookmarks.remove(pos);
             false
         } else {
@@ -219,10 +332,12 @@ impl BrowserState {
                 url: current,
             });
             true
-        }
+        };
+
+        self.persist_bookmarks();
+        added
     }
 
-    /// `http://anka.local/yer-imleri` sayfası için kayıtlı yer imlerinden dinamik HTML üretir.
     fn build_bookmarks_http_response(&self) -> String {
         let mut html_items = String::new();
         for (i, bm) in self.bookmarks.iter().enumerate() {
@@ -252,7 +367,7 @@ impl BrowserState {
                 ".kart {{ color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; padding: 8px; font-size: 16px; }}",
                 "#duyuru {{ color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; padding: 8px; font-size: 16px; }}",
                 "</style></head><body>",
-                "<h1>Anka Browser — Yer Imlerim ({} Kayit)</h1>",
+                "<h1>Anka Browser — Kalici Yer Imlerim ({} Kayit)</h1>",
                 "<nav>",
                 "<a class=\"pill\" href=\"http://anka.local/hosgeldiniz\">Ana Sayfaya Don</a>",
                 "</nav>",
@@ -265,7 +380,6 @@ impl BrowserState {
         )
     }
 
-    /// Aktif sekmede yeni bir adrese gider.
     pub fn navigate(&mut self, raw_address: &str, push_history: bool) {
         let clean_url = normalize_address(raw_address);
         if clean_url.is_empty() {
@@ -291,9 +405,10 @@ impl BrowserState {
         tab.current_url = clean_url;
         tab.page = loaded;
         tab.scroll_y = 0;
+        tab.focused_input = None;
+        tab.input_values.clear();
     }
 
-    /// Aktif sekmede Geri (`<-`) butonuna basıldığında bir önceki sayfaya döner.
     pub fn go_back(&mut self) -> bool {
         let prev_opt = self.active_mut().history.pop();
         if let Some(prev_url) = prev_opt {
@@ -306,7 +421,6 @@ impl BrowserState {
         }
     }
 
-    /// Aktif sekmede İleri (`->`) butonuna basıldığında bir sonraki sayfaya gider.
     pub fn go_forward(&mut self) -> bool {
         let next_opt = self.active_mut().forward_history.pop();
         if let Some(next_url) = next_opt {
@@ -319,25 +433,106 @@ impl BrowserState {
         }
     }
 
-    /// Aktif sekmeyi yeniden yükler (`Yenile`).
     pub fn reload(&mut self) {
         let current = self.current_url().to_string();
         self.navigate(&current, false);
     }
 
-    /// Aktif sekmeyi fare tekerleği ile dikey kaydırır (`delta_y` piksel kadar).
     pub fn scroll_by(&mut self, delta_y: i32) {
         let tab = self.active_mut();
         tab.scroll_y = (tab.scroll_y + delta_y).max(0);
     }
 
-    /// Tuval üzerindeki `(canvas_x, canvas_y)` koordinatında tıklanabilir bir link (`href`)
-    /// veya JavaScript butonu (`onclick`) olup olmadığını kontrol eder (İmleç değiştirme için).
+    /// Odaklı bir `<input>` kutusuna tek bir karakter yazar.
+    pub fn type_char(&mut self, ch: char) -> bool {
+        let Some(name) = self.active().focused_input.clone() else {
+            return false;
+        };
+        let entry = self.active_mut().input_values.entry(name).or_default();
+        entry.push(ch);
+        true
+    }
+
+    /// Odaklı `<input>` kutusundan son karakteri siler (`Backspace`).
+    pub fn backspace_input(&mut self) -> bool {
+        let Some(name) = self.active().focused_input.clone() else {
+            return false;
+        };
+        if let Some(val) = self.active_mut().input_values.get_mut(&name) {
+            val.pop();
+        }
+        true
+    }
+
+    /// Verilen `form_action` adresine sahip HTML `<form>` elemanını, içindeki `<input>`
+    /// değerlerini `?name=encoded_value` sorgu parametresi olarak ekleyip tam URL üretir!
+    pub fn build_form_submit_url(&self, action: &str) -> Option<String> {
+        let tab = self.active();
+        let mut params = Vec::new();
+        for komut in &tab.page.display_list {
+            if let Some(name) = &komut.input_name
+                && komut.form_action.as_deref() == Some(action)
+            {
+                let val = tab
+                    .input_values
+                    .get(name)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                params.push(format!(
+                    "{}={}",
+                    percent_encode_query(name),
+                    percent_encode_query(val)
+                ));
+            }
+        }
+
+        let target_raw = if action.is_empty() {
+            tab.current_url.as_str()
+        } else {
+            action
+        };
+        let base_url = Url::parse(&tab.current_url).ok()?;
+        let resolved = base_url.resolve(target_raw).ok()?;
+        let port_part = resolved
+            .port
+            .map(|p| format!(":{p}"))
+            .unwrap_or_default();
+        let query_joined = params.join("&");
+        let full_query = match (&resolved.query, query_joined.is_empty()) {
+            (Some(existing), false) => format!("?{existing}&{query_joined}"),
+            (Some(existing), true) => format!("?{existing}"),
+            (None, false) => format!("?{query_joined}"),
+            (None, true) => String::new(),
+        };
+
+        Some(format!(
+            "{}://{}{}{}{}",
+            resolved.scheme, resolved.host, port_part, resolved.path, full_query
+        ))
+    }
+
+    /// Odaklı `<input>` kutusunda `Enter` tuşuna basıldığında bağlı olduğu formu gönderir!
+    pub fn submit_focused_form(&self) -> Option<String> {
+        let focused = self.active().focused_input.as_deref()?;
+        let action = self
+            .active()
+            .page
+            .display_list
+            .iter()
+            .find(|k| k.input_name.as_deref() == Some(focused))
+            .and_then(|k| k.form_action.as_deref())?;
+        self.build_form_submit_url(action)
+    }
+
     #[allow(dead_code)]
     pub fn is_interactive_at(&self, canvas_x: i32, canvas_y: i32) -> bool {
         let tab = self.active();
         tab.page.display_list.iter().any(|komut| {
-            if komut.href.is_some() || komut.onclick.is_some() {
+            if komut.href.is_some()
+                || komut.onclick.is_some()
+                || komut.input_name.is_some()
+                || komut.is_submit
+            {
                 let draw_x = komut.x as i32 + 4;
                 let draw_right = draw_x + komut.width as i32;
                 let draw_y = komut.y as i32 - tab.scroll_y;
@@ -352,12 +547,15 @@ impl BrowserState {
         })
     }
 
-    /// Tuval (Canvas) üzerindeki `(canvas_x, canvas_y)` noktasına tıklandığında:
-    /// 1. Eğer bir `<button onclick="...">` (veya `onclick` taşıyan öğe) varsa JavaScript kodunu
-    ///    canlı olarak `anka-js` üzerinden çalıştırır, DOM'u günceller ve `ClickAction::JsUpdated` döner!
-    /// 2. Eğer bir `<a href="...">` linki varsa tam adresi çözüp `ClickAction::Navigate(url)` döner!
+    /// Tuval üzerindeki `(canvas_x, canvas_y)` tıklamasını işler:
+    /// 1. `<input>` kutusu -> Odaklar (`focused_input = Some(name)`) ve `ClickAction::Redraw` döner.
+    /// 2. `<input type="submit">` / `<form><button>` -> Formu GET sorgusuyla gönderir (`ClickAction::Navigate`).
+    /// 3. `<button onclick="...">` -> Canlı `anka-js` çalıştırır (`ClickAction::Redraw`).
+    /// 4. `<a href="...">` -> Yeni adrese gider (`ClickAction::Navigate`).
     pub fn click_at(&mut self, canvas_x: i32, canvas_y: i32) -> ClickAction {
         let tab = self.active();
+        let mut found_input: Option<String> = None;
+        let mut found_submit_action: Option<String> = None;
         let mut found_onclick: Option<String> = None;
         let mut found_href: Option<String> = None;
 
@@ -372,8 +570,17 @@ impl BrowserState {
                 && canvas_y >= draw_y
                 && canvas_y <= draw_bottom
             {
+                if let Some(name) = &komut.input_name {
+                    found_input = Some(name.clone());
+                    break;
+                }
                 if let Some(js_code) = &komut.onclick {
                     found_onclick = Some(js_code.clone());
+                    break;
+                }
+                if komut.is_submit {
+                    found_submit_action =
+                        Some(komut.form_action.clone().unwrap_or_default());
                     break;
                 }
                 if let Some(href) = &komut.href {
@@ -383,10 +590,24 @@ impl BrowserState {
             }
         }
 
+        if let Some(input_name) = found_input {
+            self.active_mut().focused_input = Some(input_name);
+            return ClickAction::Redraw;
+        }
+
+        // Input dışına tıklandıysa klavye odağını kaldır
+        self.active_mut().focused_input = None;
+
         if let Some(js_code) = found_onclick {
             let vw = self.viewport_width;
             self.active_mut().page.run_inline_js(&js_code, vw);
-            return ClickAction::JsUpdated;
+            return ClickAction::Redraw;
+        }
+
+        if let Some(action) = found_submit_action
+            && let Some(target_url) = self.build_form_submit_url(&action)
+        {
+            return ClickAction::Navigate(target_url);
         }
 
         if let Some(href) = found_href
@@ -443,7 +664,6 @@ mod tests {
     fn test_link_ve_canli_js_button_onclick_tiklama() {
         let mut state = BrowserState::new("http://anka.local/hosgeldiniz", 860);
 
-        // 1) `<script>` sayfa açılır açılmaz `js_sayac` yazısını JS ile değiştirmiş olmalı!
         assert!(
             state
                 .display_list()
@@ -451,7 +671,6 @@ mod tests {
                 .any(|k| k.text.contains("Anka JS Hazir! Tiklama Sayisi: 0"))
         );
 
-        // 2) `+1 Artir (JS)` butonunun koordinatını bulup tıkla!
         let js_btn = state
             .display_list()
             .iter()
@@ -460,9 +679,8 @@ mod tests {
             .clone();
 
         let action = state.click_at(js_btn.x as i32 + 10, js_btn.y as i32 + 5);
-        assert_eq!(action, ClickAction::JsUpdated);
+        assert_eq!(action, ClickAction::Redraw);
 
-        // Tıklama sonrası DOM yeniden çizilmiş ve sayaç "1" olmuş olmalı!
         assert!(
             state
                 .display_list()
@@ -470,7 +688,6 @@ mod tests {
                 .any(|k| k.text.contains("Tiklama Sayisi: 1"))
         );
 
-        // 3) Bir linke tıklama testini doğrula:
         let ilk_link = state
             .display_list()
             .iter()
@@ -503,23 +720,63 @@ mod tests {
     }
 
     #[test]
-    fn test_yer_imleri_ekleme_cikarma_ve_sayfasi() {
-        let mut state = BrowserState::new("http://anka.local/ozel-makale", 860);
-        assert!(!state.is_current_bookmarked());
+    fn test_yer_imleri_ekleme_cikarma_ve_diske_kalicilik() {
+        let tmp_file = std::env::temp_dir().join("anka_test_bookmarks_v028.tsv");
+        let _ = std::fs::remove_file(&tmp_file);
 
-        assert!(state.toggle_bookmark());
-        assert!(state.is_current_bookmarked());
+        {
+            let mut state = BrowserState::with_bookmarks_path(
+                "http://anka.local/ozel-makale",
+                860,
+                Some(tmp_file.clone()),
+            );
+            assert!(!state.is_current_bookmarked());
+            assert!(state.toggle_bookmark());
+            assert!(state.is_current_bookmarked());
+        }
 
-        state.navigate("http://anka.local/yer-imleri", true);
-        assert!(
-            state
-                .display_list()
-                .iter()
-                .any(|k| k.href.as_deref() == Some("http://anka.local/ozel-makale"))
+        // Tarayıcı kapatılıp yeniden açıldığında kayıtlı yer imi diskten geri gelmeli!
+        let state2 = BrowserState::with_bookmarks_path(
+            "http://anka.local/ozel-makale",
+            860,
+            Some(tmp_file.clone()),
         );
+        assert!(state2.is_current_bookmarked());
+        let _ = std::fs::remove_file(&tmp_file);
+    }
 
-        state.go_back();
-        assert!(!state.toggle_bookmark());
-        assert!(!state.is_current_bookmarked());
+    #[test]
+    fn test_html_form_input_yazma_ve_arama_gonderme() {
+        let mut state = BrowserState::new("http://anka.local/hosgeldiniz", 860);
+        let input_box = state
+            .display_list()
+            .iter()
+            .find(|k| k.input_name.as_deref() == Some("search"))
+            .expect("Ana sayfada Vikipedi arama kutusu olmali")
+            .clone();
+
+        // 1. Arama kutusuna tıkla (focus al)
+        assert_eq!(
+            state.click_at(input_box.x as i32 + 10, input_box.y as i32 + 5),
+            ClickAction::Redraw
+        );
+        assert_eq!(state.focused_input(), Some("search"));
+
+        // 2. Klavyeden "Anka kusu" yaz (son harfi silip tekrar ekle)
+        for ch in "Anka kusx".chars() {
+            assert!(state.type_char(ch));
+        }
+        assert!(state.backspace_input());
+        assert!(state.type_char('u'));
+        assert_eq!(state.input_value("search"), Some("Anka kusu"));
+
+        // 3. Formu gönder -> `?search=Anka+kusu` URL'si üretilmeli!
+        let submit_url = state
+            .submit_focused_form()
+            .expect("Form URL olusturulmali");
+        assert_eq!(
+            submit_url,
+            "https://tr.wikipedia.org/w/index.php?search=Anka+kusu"
+        );
     }
 }

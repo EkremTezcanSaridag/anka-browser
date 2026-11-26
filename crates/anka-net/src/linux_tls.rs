@@ -178,7 +178,7 @@ pub fn fetch_https_once(url: &Url) -> Result<HttpResponse, NetError> {
 
         // 8. ADIM: Şifreli tünelin içinden HTTP/1.1 GET mektubumuzu gönder!
         let request = format!(
-            "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: AnkaBrowser/0.2.6 (Linux; TelekEngine)\r\nAccept: text/html,application/xhtml+xml,text/css,image/*,*/*\r\nConnection: close\r\n\r\n",
+            "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: AnkaBrowser/0.2.8 (Linux; TelekEngine)\r\nAccept: text/html,application/xhtml+xml,text/css,image/*,*/*\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n",
             request_path, url.host
         );
 

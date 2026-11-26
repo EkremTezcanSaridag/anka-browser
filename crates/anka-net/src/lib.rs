@@ -7,6 +7,8 @@ use std::net::TcpStream;
 // Böylece anka-net, anka-url'in parçaladığı adresleri anlayabilir.
 use anka_url::Url;
 
+mod gzip;
+
 #[cfg(windows)]
 mod winhttp_tls;
 
@@ -248,10 +250,21 @@ pub fn parse_http_response_bytes(raw: &[u8]) -> Result<HttpResponse, NetError> {
     let is_chunked = headers.iter().any(|(k, v)| {
         k.eq_ignore_ascii_case("transfer-encoding") && v.to_lowercase().contains("chunked")
     });
-    let final_raw_body = if is_chunked {
+    let unchunked_body = if is_chunked {
         decode_chunked_bytes(body_bytes)?
     } else {
         body_bytes.to_vec()
+    };
+
+    // 4B. ADIM: Eğer sunucu veriyi `Content-Encoding: gzip` ile sıkıştırıp gönderdiyse
+    // saf Rust GZIP/DEFLATE açıcımızla (`gzip::decompress_gzip`) aç!
+    let is_gzip = headers.iter().any(|(k, v)| {
+        k.eq_ignore_ascii_case("content-encoding") && v.to_lowercase().contains("gzip")
+    });
+    let final_raw_body = if is_gzip {
+        gzip::decompress_gzip(&unchunked_body).unwrap_or(unchunked_body)
+    } else {
+        unchunked_body
     };
 
     let body = String::from_utf8_lossy(&final_raw_body).into_owned();
@@ -366,5 +379,26 @@ mod tests {
         let yanit = parse_http_response_bytes(&ham_paket).unwrap();
         assert_eq!(yanit.status_code, 200);
         assert_eq!(yanit.raw_body, png_baytlari);
+    }
+
+    #[test]
+    fn test_gzip_sikistirilmis_http_yaniti_acma() {
+        let mut ham_paket =
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Encoding: gzip\r\n\r\n"
+                .to_vec();
+        let gzip_body: [u8; 74] = [
+            31, 139, 8, 0, 222, 92, 7, 107, 2, 255, 179, 201, 40, 201, 205, 177, 179, 73, 202, 79,
+            169, 180, 179, 201, 48, 180, 243, 77, 45, 202, 72, 76, 74, 84, 112, 204, 203, 78, 84,
+            112, 143, 242, 12, 80, 8, 73, 45, 46, 201, 84, 84, 192, 37, 97, 163, 15, 212, 101, 163,
+            15, 49, 64, 31, 108, 26, 0, 212, 92, 3, 193, 84, 0, 0, 0,
+        ];
+        ham_paket.extend_from_slice(&gzip_body);
+
+        let yanit = parse_http_response_bytes(&ham_paket).unwrap();
+        assert_eq!(yanit.status_code, 200);
+        assert_eq!(
+            yanit.body,
+            "<html><body><h1>Merhaba Anka GZIP Testi! Merhaba Anka GZIP Testi!</h1></body></html>"
+        );
     }
 }
