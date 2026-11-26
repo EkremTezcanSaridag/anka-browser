@@ -146,7 +146,7 @@ fn parse_tag_and_attrs(tag_content: &str) -> (String, Vec<(String, String)>) {
                     {
                         let after_quote = &after_eq[1..];
                         if let Some(end_quote) = after_quote.find(quote) {
-                            let val = after_quote[..end_quote].to_string();
+                            let val = decode_html_entities(&after_quote[..end_quote]);
                             if !key.is_empty() {
                                 attrs.push((key, val));
                             }
@@ -155,7 +155,7 @@ fn parse_tag_and_attrs(tag_content: &str) -> (String, Vec<(String, String)>) {
                         }
                     }
                     let end_val = after_eq.find(char::is_whitespace).unwrap_or(after_eq.len());
-                    let val = after_eq[..end_val].to_string();
+                    let val = decode_html_entities(&after_eq[..end_val]);
                     if !key.is_empty() {
                         attrs.push((key, val));
                     }

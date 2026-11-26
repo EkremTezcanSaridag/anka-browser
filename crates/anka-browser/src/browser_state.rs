@@ -1,6 +1,6 @@
 // Anka Browser - İşletim Sisteminden Bağımsız Ortak Tarayıcı Durumu (BrowserState)
-// Çoklu Sekme (Multi-Tab), Kalıcı Yer İmleri (Diske Kayıt), Canlı JS `onclick`
-// ve Etkileşimli HTML `<form>` / `<input>` Arama Kutusu Yönetimi (v0.2.10)
+// Çoklu Sekme (Multi-Tab), Anka Kalkan (Reklam/İzleyici Engelleyici), Kalıcı Yer İmleri,
+// Canlı JS `onclick` ve Etkileşimli HTML `<form>` / `<input>` Yönetimi (v0.2.11)
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -8,7 +8,9 @@ use std::path::PathBuf;
 use anka_paint::PaintCommand;
 use anka_url::Url;
 
-use crate::{LoadedPage, html_motoru_calistir, motoru_calistir, normalize_address};
+use crate::{
+    LoadedPage, html_motoru_calistir_kalkanli, motoru_calistir_kalkanli, normalize_address,
+};
 
 /// Kullanıcının web sayfası tuvaline tıkladığında tetiklenebilecek eylem türleri:
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +56,8 @@ pub struct BrowserState {
     pub active_tab: usize,
     pub bookmarks: Vec<Bookmark>,
     pub viewport_width: u32,
+    /// Anka Kalkan (Reklam & İzleyici Engelleyici) açık mı?
+    pub shield_enabled: bool,
     /// Yer imlerinin kaydedileceği dosya yolu (`None` ise disk kaydı yapılmaz — test izolasyonu için)
     bookmarks_file: Option<PathBuf>,
 }
@@ -170,8 +174,13 @@ impl BrowserState {
             .filter(|list| !list.is_empty())
             .unwrap_or_else(default_bookmarks);
 
-        let ilk_sayfa = motoru_calistir(initial_address, viewport_width);
-        let temiz_url = normalize_address(initial_address);
+        let shield_enabled = true;
+        let mut temiz_url = normalize_address(initial_address);
+        if shield_enabled {
+            let (cleaned, _) = anka_net::shield::strip_tracking_params(&temiz_url);
+            temiz_url = cleaned;
+        }
+        let ilk_sayfa = motoru_calistir_kalkanli(initial_address, viewport_width, shield_enabled);
 
         Self {
             tabs: vec![TabState {
@@ -186,6 +195,7 @@ impl BrowserState {
             active_tab: 0,
             bookmarks,
             viewport_width,
+            shield_enabled,
             bookmarks_file,
         }
     }
@@ -252,9 +262,29 @@ impl BrowserState {
     pub fn window_title(&self) -> String {
         let tab_info = format!("[Sekme {}/{}]", self.active_tab + 1, self.tabs.len());
         match &self.active().page.page_title {
-            Some(t) => format!("{t} {tab_info} — Anka Browser v0.2.10"),
-            None => format!("Anka Browser v0.2.10 {tab_info} — Telek Engine"),
+            Some(t) => format!("{t} {tab_info} — Anka Browser v0.2.11"),
+            None => format!("Anka Browser v0.2.11 {tab_info} — Telek Engine"),
         }
+    }
+
+    pub fn shield_button_label(&self) -> String {
+        if self.shield_enabled {
+            let count = self.active().page.shield_stats.total_blocked();
+            if count > 0 {
+                format!("Kalkan: Acik ({count})")
+            } else {
+                "Kalkan: Acik".to_string()
+            }
+        } else {
+            "Kalkan: Kapali".to_string()
+        }
+    }
+
+    /// Anka Kalkan korumasını açıp kapatır ve aktif sekmeyi yeni kurala göre yeniden yükler.
+    pub fn toggle_shield(&mut self) -> bool {
+        self.shield_enabled = !self.shield_enabled;
+        self.reload();
+        self.shield_enabled
     }
 
     pub fn tab_label(&self, index: usize) -> String {
@@ -275,9 +305,15 @@ impl BrowserState {
     }
 
     pub fn new_tab(&mut self, initial_address: &str) -> usize {
-        let sayfa = motoru_calistir(initial_address, self.viewport_width);
+        let mut clean_url = normalize_address(initial_address);
+        if self.shield_enabled {
+            let (cleaned, _) = anka_net::shield::strip_tracking_params(&clean_url);
+            clean_url = cleaned;
+        }
+        let sayfa =
+            motoru_calistir_kalkanli(initial_address, self.viewport_width, self.shield_enabled);
         self.tabs.push(TabState {
-            current_url: normalize_address(initial_address),
+            current_url: clean_url,
             page: sayfa,
             history: Vec::new(),
             forward_history: Vec::new(),
@@ -385,9 +421,13 @@ impl BrowserState {
     }
 
     pub fn navigate(&mut self, raw_address: &str, push_history: bool) {
-        let clean_url = normalize_address(raw_address);
+        let mut clean_url = normalize_address(raw_address);
         if clean_url.is_empty() {
             return;
+        }
+        if self.shield_enabled {
+            let (cleaned, _) = anka_net::shield::strip_tracking_params(&clean_url);
+            clean_url = cleaned;
         }
 
         let current_url_before = self.active().current_url.clone();
@@ -398,11 +438,12 @@ impl BrowserState {
         }
 
         let viewport_w = self.viewport_width;
+        let shield_on = self.shield_enabled;
         let loaded = if clean_url == "http://anka.local/yer-imleri" {
             let raw_http = self.build_bookmarks_http_response();
-            html_motoru_calistir(&clean_url, &raw_http, viewport_w)
+            html_motoru_calistir_kalkanli(&clean_url, &raw_http, viewport_w, shield_on)
         } else {
-            motoru_calistir(&clean_url, viewport_w)
+            motoru_calistir_kalkanli(raw_address, viewport_w, shield_on)
         };
 
         let tab = self.active_mut();
@@ -781,6 +822,31 @@ mod tests {
         assert_eq!(
             submit_url,
             "https://tr.wikipedia.org/w/index.php?search=Anka+kusu"
+        );
+    }
+
+    #[test]
+    fn test_anka_kalkan_reklam_engelleme_ve_ac_kapat() {
+        let mut state = BrowserState::new("http://anka.local/kalkan", 860);
+        assert!(state.shield_enabled);
+
+        // Kalkan açıkken reklam kutusu gizlenmiş, 1x1 piksel + script + ?utm_source/?fbclid engellenmiş olmalı!
+        assert!(state.active().page.shield_stats.total_blocked() >= 5);
+        assert!(
+            !state
+                .display_list()
+                .iter()
+                .any(|b| b.text.contains("REKLAM ALANI"))
+        );
+
+        // Kalkanı kapat -> sayfa yenilenir ve reklam kutusu artık görünür hale gelir!
+        assert!(!state.toggle_shield());
+        assert_eq!(state.active().page.shield_stats.total_blocked(), 0);
+        assert!(
+            state
+                .display_list()
+                .iter()
+                .any(|b| b.text.contains("REKLAM ALANI"))
         );
     }
 }

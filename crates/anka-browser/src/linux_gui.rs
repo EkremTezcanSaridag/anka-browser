@@ -287,6 +287,7 @@ struct LinuxGuiApp {
     window: usize,
     tab_buttons: [usize; MAX_TAB_SLOTS],
     btn_bookmark_toggle: usize,
+    btn_shield: usize,
     url_entry: usize,
     canvas: usize,
     status_label: usize,
@@ -340,12 +341,14 @@ fn arayuzu_guncelle(api: &GtkCairoApi, app: &LinuxGuiApp) {
         "☆ Yer Imi"
     };
     let bm_c = to_cstr(bm_label);
+    let shield_c = to_cstr(&app.state.shield_button_label());
 
     unsafe {
         (api.gtk_window_set_title)(app.window as *mut GtkWindow, title_c.as_ptr());
         (api.gtk_entry_set_text)(app.url_entry as *mut GtkEntry, url_c.as_ptr());
         (api.gtk_label_set_text)(app.status_label as *mut GtkLabel, status_c.as_ptr());
         (api.gtk_button_set_label)(app.btn_bookmark_toggle as *mut GtkButton, bm_c.as_ptr());
+        (api.gtk_button_set_label)(app.btn_shield as *mut GtkButton, shield_c.as_ptr());
 
         for (idx, &btn_ptr) in app.tab_buttons.iter().enumerate() {
             let btn = btn_ptr as *mut GtkWidget;
@@ -432,6 +435,16 @@ unsafe extern "C" fn on_bookmark_toggle_clicked(_widget: *mut GtkWidget, _data: 
 
 unsafe extern "C" fn on_bookmarks_page_clicked(_widget: *mut GtkWidget, _data: *mut c_void) {
     adres_yukle("http://anka.local/yer-imleri", true);
+}
+
+unsafe extern "C" fn on_shield_toggle_clicked(_widget: *mut GtkWidget, _data: *mut c_void) {
+    let Some(api) = gtk_api() else { return };
+    if let Ok(mut guard) = LINUX_APP.lock()
+        && let Some(app) = guard.as_mut()
+    {
+        app.state.toggle_shield();
+        arayuzu_guncelle(api, app);
+    }
 }
 
 unsafe extern "C" fn on_navigate_triggered(_widget: *mut GtkWidget, _data: *mut c_void) {
@@ -962,6 +975,8 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) -> bool {
         let url_entry = (api.gtk_entry_new)();
         let btn_go = (api.gtk_button_new_with_label)(to_cstr("Git ->").as_ptr());
         let btn_bookmark_toggle = (api.gtk_button_new_with_label)(to_cstr("☆ Yer Imi").as_ptr());
+        let btn_shield =
+            (api.gtk_button_new_with_label)(to_cstr(&state.shield_button_label()).as_ptr());
 
         (api.gtk_entry_set_text)(
             url_entry as *mut GtkEntry,
@@ -977,6 +992,7 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) -> bool {
         (api.gtk_box_pack_start)(toolbar as *mut GtkBox, url_entry, 1, 1, 0);
         (api.gtk_box_pack_start)(toolbar as *mut GtkBox, btn_go, 0, 0, 0);
         (api.gtk_box_pack_start)(toolbar as *mut GtkBox, btn_bookmark_toggle, 0, 0, 0);
+        (api.gtk_box_pack_start)(toolbar as *mut GtkBox, btn_shield, 0, 0, 0);
 
         connect_signal(api, btn_back, "clicked", on_back_clicked as GCallback);
         connect_signal(api, btn_forward, "clicked", on_forward_clicked as GCallback);
@@ -996,6 +1012,12 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) -> bool {
             btn_bookmark_toggle,
             "clicked",
             on_bookmark_toggle_clicked as GCallback,
+        );
+        connect_signal(
+            api,
+            btn_shield,
+            "clicked",
+            on_shield_toggle_clicked as GCallback,
         );
 
         // ORTA WEB TUVALİ
@@ -1034,6 +1056,7 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) -> bool {
             window: window as usize,
             tab_buttons,
             btn_bookmark_toggle: btn_bookmark_toggle as usize,
+            btn_shield: btn_shield as usize,
             url_entry: url_entry as usize,
             canvas: canvas as usize,
             status_label: status_label as usize,
