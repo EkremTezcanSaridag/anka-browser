@@ -109,7 +109,7 @@ impl LoadedPage {
         };
 
         self.status_message = format!(
-            "{} {} | {} bayt | {} kutu | Telek Engine v0.2.9{}",
+            "{} {} | {} bayt | {} kutu | Telek Engine v0.2.10{}",
             protokol_etiketi,
             self.status_code,
             self.body_len,
@@ -282,7 +282,7 @@ pub fn motoru_calistir(hedef_adres: &str, viewport_width: u32) -> LoadedPage {
             ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; padding: 10px; font-size: 15px; }",
             "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; padding: 10px; font-size: 15px; }",
             "</style></head><body>",
-            "<h1>Anka Browser v0.2.9 — Telek Engine + Gercek Web Siteleri!</h1>",
+            "<h1>Anka Browser v0.2.10 — Cok Dilli Pango Font + Akilli CSS Seciciler!</h1>",
             "<nav>",
             "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
             "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
@@ -378,7 +378,7 @@ fn main() {
     // Ekransız (Headless / `--headless` / CI) ortamda terminal önizlemesi çalışır
     let sayfa = motoru_calistir(&baslangic_adresi, 860);
     println!(
-        "Anka Browser v0.2.9 ({}) [{}] | page_bg={:?} -> {}",
+        "Anka Browser v0.2.10 ({}) [{}] | page_bg={:?} -> {}",
         baslangic_adresi,
         sayfa.page_title.as_deref().unwrap_or("Adsız"),
         sayfa.page_bg,

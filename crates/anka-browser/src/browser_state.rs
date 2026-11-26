@@ -1,6 +1,6 @@
 // Anka Browser - İşletim Sisteminden Bağımsız Ortak Tarayıcı Durumu (BrowserState)
 // Çoklu Sekme (Multi-Tab), Kalıcı Yer İmleri (Diske Kayıt), Canlı JS `onclick`
-// ve Etkileşimli HTML `<form>` / `<input>` Arama Kutusu Yönetimi (v0.2.9)
+// ve Etkileşimli HTML `<form>` / `<input>` Arama Kutusu Yönetimi (v0.2.10)
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -252,8 +252,8 @@ impl BrowserState {
     pub fn window_title(&self) -> String {
         let tab_info = format!("[Sekme {}/{}]", self.active_tab + 1, self.tabs.len());
         match &self.active().page.page_title {
-            Some(t) => format!("{t} {tab_info} — Anka Browser v0.2.9"),
-            None => format!("Anka Browser v0.2.9 {tab_info} — Telek Engine"),
+            Some(t) => format!("{t} {tab_info} — Anka Browser v0.2.10"),
+            None => format!("Anka Browser v0.2.10 {tab_info} — Telek Engine"),
         }
     }
 

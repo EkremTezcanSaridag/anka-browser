@@ -1,7 +1,8 @@
-// Anka Browser - Sıfır Bağımlılıklı Yerel Linux Masaüstü Penceresi (GTK3 + Cairo 2D + dlopen)
-// Derleme sırasında `libgtk-3-dev` / `libcairo2-dev` paketi GEREKTİRMEZ!
+// Anka Browser - Sıfır Bağımlılıklı Yerel Linux Masaüstü Penceresi (GTK3 + Cairo + Pango + dlopen)
+// Derleme sırasında `libgtk-3-dev` / `libcairo2-dev` / `libpango1.0-dev` paketi GEREKTİRMEZ!
 // Çalışma zamanında (runtime) sistemde zaten kurulu bulunan `libgtk-3.so.0`, `libgdk-3.so.0`,
-// `libgobject-2.0.so.0` ve `libcairo.so.2` kütüphanelerini POSIX `dlopen` + `dlsym` ile yükler.
+// `libgobject-2.0.so.0`, `libcairo.so.2` ve opsiyonel Pango (`libpango-1.0.so.0` / `libpangocairo-1.0.so.0`)
+// kütüphanelerini POSIX `dlopen` + `dlsym` ile yükler.
 // Böylece hem tüm Linux dağıtımlarında (Wayland & X11) hem de ekransız CI sunucularında kusursuz çalışır.
 
 #![cfg(target_os = "linux")]
@@ -23,6 +24,8 @@ type GtkLabel = c_void;
 type GdkEvent = c_void;
 type CairoT = c_void;
 type CairoSurfaceT = c_void;
+type PangoLayout = c_void;
+type PangoFontDescription = c_void;
 type GCallback = *const c_void;
 
 const RTLD_NOW: c_int = 2;
@@ -62,7 +65,23 @@ unsafe extern "C" {
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
 }
 
-/// Çalışma zamanında dinamik olarak yüklenen GTK3 + GDK3 + GObject + Cairo C fonksiyon tablosu:
+/// Çok dilli metin şekillendirme (Arapça, Japonca, Çince, Türkçe ve emoji fallback) ve piksel ölçümü için opsiyonel Pango API:
+struct PangoApi {
+    pango_cairo_create_layout: unsafe extern "C" fn(*mut CairoT) -> *mut PangoLayout,
+    pango_cairo_show_layout: unsafe extern "C" fn(*mut CairoT, *mut PangoLayout),
+    pango_font_description_from_string:
+        unsafe extern "C" fn(*const c_char) -> *mut PangoFontDescription,
+    pango_font_description_set_absolute_size:
+        unsafe extern "C" fn(*mut PangoFontDescription, c_double),
+    pango_font_description_free: unsafe extern "C" fn(*mut PangoFontDescription),
+    pango_layout_set_text: unsafe extern "C" fn(*mut PangoLayout, *const c_char, c_int),
+    pango_layout_set_font_description:
+        unsafe extern "C" fn(*mut PangoLayout, *const PangoFontDescription),
+    pango_layout_get_pixel_size: unsafe extern "C" fn(*mut PangoLayout, *mut c_int, *mut c_int),
+    g_object_unref: unsafe extern "C" fn(*mut c_void),
+}
+
+/// Çalışma zamanında dinamik olarak yüklenen GTK3 + GDK3 + GObject + Cairo (+ Pango) C fonksiyon tablosu:
 struct GtkCairoApi {
     gtk_init_check: unsafe extern "C" fn(*mut c_int, *mut *mut *mut c_char) -> c_int,
     gtk_main: unsafe extern "C" fn(),
@@ -127,6 +146,7 @@ struct GtkCairoApi {
     cairo_translate: unsafe extern "C" fn(*mut CairoT, c_double, c_double),
     cairo_scale: unsafe extern "C" fn(*mut CairoT, c_double, c_double),
     cairo_paint: unsafe extern "C" fn(*mut CairoT),
+    pango: Option<PangoApi>,
 }
 
 unsafe impl Send for GtkCairoApi {}
@@ -150,6 +170,37 @@ unsafe fn load_sym<T>(handle: *mut c_void, name: &CStr) -> Option<T> {
         None
     } else {
         Some(unsafe { std::mem::transmute_copy(&ptr) })
+    }
+}
+
+unsafe fn load_pango_api(gobj: *mut c_void) -> Option<PangoApi> {
+    let pango = unsafe { open_lib(&[c"libpango-1.0.so.0", c"libpango-1.0.so"]) };
+    let pangocairo = unsafe { open_lib(&[c"libpangocairo-1.0.so.0", c"libpangocairo-1.0.so"]) };
+    if pango.is_null() || pangocairo.is_null() {
+        return None;
+    }
+
+    unsafe {
+        Some(PangoApi {
+            pango_cairo_create_layout: load_sym(pangocairo, c"pango_cairo_create_layout")?,
+            pango_cairo_show_layout: load_sym(pangocairo, c"pango_cairo_show_layout")?,
+            pango_font_description_from_string: load_sym(
+                pango,
+                c"pango_font_description_from_string",
+            )?,
+            pango_font_description_set_absolute_size: load_sym(
+                pango,
+                c"pango_font_description_set_absolute_size",
+            )?,
+            pango_font_description_free: load_sym(pango, c"pango_font_description_free")?,
+            pango_layout_set_text: load_sym(pango, c"pango_layout_set_text")?,
+            pango_layout_set_font_description: load_sym(
+                pango,
+                c"pango_layout_set_font_description",
+            )?,
+            pango_layout_get_pixel_size: load_sym(pango, c"pango_layout_get_pixel_size")?,
+            g_object_unref: load_sym(gobj, c"g_object_unref")?,
+        })
     }
 }
 
@@ -225,6 +276,7 @@ fn gtk_api() -> Option<&'static GtkCairoApi> {
                 cairo_translate: load_sym(cairo, c"cairo_translate")?,
                 cairo_scale: load_sym(cairo, c"cairo_scale")?,
                 cairo_paint: load_sym(cairo, c"cairo_paint")?,
+                pango: load_pango_api(gobj),
             })
         })
         .as_ref()
@@ -708,27 +760,18 @@ unsafe extern "C" fn on_canvas_draw(
                 };
 
                 if !gorsel_cizildi && !render_text.is_empty() {
-                    let weight = if matches!(
+                    let is_bold = matches!(
                         komut.tag.as_str(),
                         "h1" | "h2" | "h3" | "strong" | "b"
-                    ) {
-                        CAIRO_FONT_WEIGHT_BOLD
-                    } else {
-                        CAIRO_FONT_WEIGHT_NORMAL
-                    };
-                    let slant = if matches!(komut.tag.as_str(), "em" | "i") {
-                        CAIRO_FONT_SLANT_ITALIC
-                    } else {
-                        CAIRO_FONT_SLANT_NORMAL
-                    };
-
-                    (api.cairo_select_font_face)(
-                        cr,
-                        font_family.as_ptr(),
-                        slant,
-                        weight,
                     );
-                    (api.cairo_set_font_size)(cr, komut.font_size as c_double);
+                    let is_italic = matches!(komut.tag.as_str(), "em" | "i");
+                    let is_code = komut.tag == "code";
+                    let is_link_text = komut.tag == "a"
+                        || (komut.href.is_some()
+                            && !matches!(
+                                komut.tag.as_str(),
+                                "img" | "button" | "input" | "select"
+                            ));
 
                     (api.cairo_set_source_rgb)(
                         cr,
@@ -738,30 +781,101 @@ unsafe extern "C" fn on_canvas_draw(
                     );
 
                     let pad = komut.padding as c_double;
-                    let approx_text_w = ((render_text.chars().count() as c_double)
-                        * (komut.font_size as c_double * 0.56))
-                        .min(box_w - pad * 2.0)
-                        .max(0.0);
-
-                    let text_x = match komut.text_align.as_str() {
-                        "center" => (draw_x - 4.0) + ((box_w - approx_text_w) / 2.0).max(pad),
-                        "right" => (draw_x - 4.0) + (box_w - approx_text_w - pad).max(pad),
-                        _ => draw_x + 4.0 + pad,
-                    };
-
-                    let baseline_y = draw_y + pad + (komut.font_size as c_double);
-                    (api.cairo_move_to)(cr, text_x, baseline_y);
-
                     let c_text = to_cstr(&render_text);
-                    (api.cairo_show_text)(cr, c_text.as_ptr());
 
-                    if komut.tag == "a"
-                        || (komut.href.is_some()
-                            && !matches!(komut.tag.as_str(), "img" | "button" | "input" | "select"))
-                    {
-                        (api.cairo_set_line_width)(cr, 1.0);
-                        (api.cairo_rectangle)(cr, text_x, baseline_y + 2.0, approx_text_w, 1.0);
-                        (api.cairo_fill)(cr);
+                    if let Some(pango) = &api.pango {
+                        let font_desc_c = match (is_code, is_bold, is_italic) {
+                            (true, true, _) => c"Monospace Bold",
+                            (true, false, _) => c"Monospace",
+                            (false, true, true) => c"Sans Bold Italic",
+                            (false, true, false) => c"Sans Bold",
+                            (false, false, true) => c"Sans Italic",
+                            (false, false, false) => c"Sans",
+                        };
+                        let layout = (pango.pango_cairo_create_layout)(cr);
+                        let desc = (pango.pango_font_description_from_string)(font_desc_c.as_ptr());
+                        if !layout.is_null() {
+                            if !desc.is_null() {
+                                (pango.pango_font_description_set_absolute_size)(
+                                    desc,
+                                    (komut.font_size as c_double) * 1024.0,
+                                );
+                                (pango.pango_layout_set_font_description)(layout, desc);
+                            }
+                            (pango.pango_layout_set_text)(layout, c_text.as_ptr(), -1);
+
+                            let mut tw: c_int = 0;
+                            let mut th: c_int = 0;
+                            (pango.pango_layout_get_pixel_size)(layout, &mut tw, &mut th);
+
+                            let real_w = (tw as c_double)
+                                .min((box_w - pad * 2.0).max(0.0))
+                                .max(0.0);
+                            let text_x = match komut.text_align.as_str() {
+                                "center" => (draw_x - 4.0) + ((box_w - real_w) / 2.0).max(pad),
+                                "right" => (draw_x - 4.0) + (box_w - real_w - pad).max(pad),
+                                _ => draw_x + 4.0 + pad,
+                            };
+
+                            let top_y = draw_y + pad + 2.0;
+                            (api.cairo_move_to)(cr, text_x, top_y);
+                            (pango.pango_cairo_show_layout)(cr, layout);
+
+                            if is_link_text {
+                                let underline_y = top_y
+                                    + (th as c_double).max(komut.font_size as c_double)
+                                    - 1.0;
+                                (api.cairo_set_line_width)(cr, 1.0);
+                                (api.cairo_rectangle)(cr, text_x, underline_y, real_w, 1.0);
+                                (api.cairo_fill)(cr);
+                            }
+                        }
+                        if !desc.is_null() {
+                            (pango.pango_font_description_free)(desc);
+                        }
+                        if !layout.is_null() {
+                            (pango.g_object_unref)(layout.cast());
+                        }
+                    } else {
+                        let weight = if is_bold {
+                            CAIRO_FONT_WEIGHT_BOLD
+                        } else {
+                            CAIRO_FONT_WEIGHT_NORMAL
+                        };
+                        let slant = if is_italic {
+                            CAIRO_FONT_SLANT_ITALIC
+                        } else {
+                            CAIRO_FONT_SLANT_NORMAL
+                        };
+
+                        (api.cairo_select_font_face)(
+                            cr,
+                            font_family.as_ptr(),
+                            slant,
+                            weight,
+                        );
+                        (api.cairo_set_font_size)(cr, komut.font_size as c_double);
+
+                        let approx_text_w = ((render_text.chars().count() as c_double)
+                            * (komut.font_size as c_double * 0.56))
+                            .min(box_w - pad * 2.0)
+                            .max(0.0);
+
+                        let text_x = match komut.text_align.as_str() {
+                            "center" => (draw_x - 4.0) + ((box_w - approx_text_w) / 2.0).max(pad),
+                            "right" => (draw_x - 4.0) + (box_w - approx_text_w - pad).max(pad),
+                            _ => draw_x + 4.0 + pad,
+                        };
+
+                        let baseline_y = draw_y + pad + (komut.font_size as c_double);
+                        (api.cairo_move_to)(cr, text_x, baseline_y);
+                        (api.cairo_show_text)(cr, c_text.as_ptr());
+
+                        if is_link_text {
+                            (api.cairo_set_line_width)(cr, 1.0);
+                            (api.cairo_rectangle)(cr, text_x, baseline_y + 2.0, approx_text_w, 1.0);
+                            (api.cairo_fill)(cr);
+                        }
                     }
                 }
             }
