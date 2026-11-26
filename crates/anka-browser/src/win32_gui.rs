@@ -70,6 +70,7 @@ const ID_BTN_NEW_TAB: usize = 109;
 const ID_BTN_CLOSE_TAB: usize = 110;
 const ID_BTN_BOOKMARK_TOGGLE: usize = 111;
 const ID_BTN_BOOKMARKS_PAGE: usize = 112;
+const ID_BTN_SHIELD: usize = 113;
 const ID_BTN_TAB_BASE: usize = 200;
 const MAX_TAB_SLOTS: usize = 5;
 
@@ -236,6 +237,7 @@ unsafe extern "system" {
 struct PencereDurumu {
     tab_buttons: [usize; MAX_TAB_SLOTS],
     btn_bookmark_toggle: usize,
+    btn_shield: usize,
     url_edit: usize,
     btn_go: usize,
     state: BrowserState,
@@ -261,12 +263,16 @@ fn pencereyi_yenile(hwnd: HWND, st: &PencereDurumu) {
         "* Yer Imi"
     };
     let wide_bm = to_wide(bm_label);
+    let wide_shield = to_wide(&st.state.shield_button_label());
 
     unsafe {
         SetWindowTextW(url_edit, wide_url.as_ptr());
         SetWindowTextW(hwnd, wide_title.as_ptr());
         if st.btn_bookmark_toggle != 0 {
             SetWindowTextW(st.btn_bookmark_toggle as HWND, wide_bm.as_ptr());
+        }
+        if st.btn_shield != 0 {
+            SetWindowTextW(st.btn_shield as HWND, wide_shield.as_ptr());
         }
         for (idx, &btn_ptr) in st.tab_buttons.iter().enumerate() {
             if btn_ptr != 0 {
@@ -549,11 +555,28 @@ unsafe extern "system" fn wnd_proc(
                 );
                 SendMessageW(btn_bookmark_toggle, WM_SETFONT, ui_font as WPARAM, 1);
 
+                let btn_shield = CreateWindowExW(
+                    0,
+                    to_wide("BUTTON").as_ptr(),
+                    to_wide("Kalkan: Acik").as_ptr(),
+                    WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                    936,
+                    42,
+                    110,
+                    28,
+                    hwnd,
+                    ID_BTN_SHIELD as HMENU,
+                    hinst,
+                    null_mut(),
+                );
+                SendMessageW(btn_shield, WM_SETFONT, ui_font as WPARAM, 1);
+
                 if let Ok(mut guard) = DURUM.lock()
                     && let Some(st) = guard.as_mut()
                 {
                     st.tab_buttons = tab_buttons;
                     st.btn_bookmark_toggle = btn_bookmark_toggle as usize;
+                    st.btn_shield = btn_shield as usize;
                     st.url_edit = url_edit as usize;
                     st.btn_go = btn_go as usize;
                     pencereyi_yenile(hwnd, st);
@@ -576,14 +599,22 @@ unsafe extern "system" fn wnd_proc(
                 if let Ok(guard) = DURUM.lock()
                     && let Some(st) = guard.as_ref()
                 {
-                    let edit_w = (width - 388 - 178).max(120);
+                    let edit_w = (width - 388 - 286).max(120);
                     MoveWindow(st.url_edit as HWND, 388, 42, edit_w, 28, 1);
-                    MoveWindow(st.btn_go as HWND, 388 + edit_w + 6, 42, 68, 28, 1);
+                    MoveWindow(st.btn_go as HWND, 388 + edit_w + 6, 42, 64, 28, 1);
                     MoveWindow(
                         st.btn_bookmark_toggle as HWND,
-                        388 + edit_w + 80,
+                        388 + edit_w + 76,
                         42,
-                        86,
+                        84,
+                        28,
+                        1,
+                    );
+                    MoveWindow(
+                        st.btn_shield as HWND,
+                        388 + edit_w + 166,
+                        42,
+                        110,
                         28,
                         1,
                     );
@@ -668,6 +699,14 @@ unsafe extern "system" fn wnd_proc(
                         && let Some(st) = guard.as_mut()
                     {
                         st.state.toggle_bookmark();
+                        pencereyi_yenile(hwnd, st);
+                    }
+                }
+                ID_BTN_SHIELD => {
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                    {
+                        st.state.toggle_shield();
                         pencereyi_yenile(hwnd, st);
                     }
                 }
@@ -1073,6 +1112,7 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) {
         *guard = Some(PencereDurumu {
             tab_buttons: [0usize; MAX_TAB_SLOTS],
             btn_bookmark_toggle: 0,
+            btn_shield: 0,
             url_edit: 0,
             btn_go: 0,
             state,

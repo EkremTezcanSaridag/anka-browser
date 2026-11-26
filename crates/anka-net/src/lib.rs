@@ -8,6 +8,7 @@ use std::net::TcpStream;
 use anka_url::Url;
 
 mod gzip;
+pub mod shield;
 
 #[cfg(windows)]
 mod winhttp_tls;
@@ -40,6 +41,9 @@ pub enum NetError {
 
     // 5. Sonsuz yönlendirme döngüsü koruması (5'ten fazla 301/302 gelirse dur!)
     TooManyRedirects,
+
+    // 6. Anka Kalkan tarafından reklam veya izleyici olarak engellendi!
+    BlockedByShield(String),
 }
 
 
@@ -92,9 +96,12 @@ impl HttpResponse {
 /// Verilen `Url` adresine bağlanır (`http`, `https` veya yerel `file://`) ve sunucu `301 / 302 / 303 / 307 / 308`
 /// yönlendirme yanıtı dönerse `Location:` başlığını otomatik takip eder (en fazla 5 kez).
 pub fn fetch(url: &Url) -> Result<HttpResponse, NetError> {
-    // YEREL DOSYA PROTOKOLÜ (`file:///home/.../index.html`):
-    // Python veya başka bir yerel sunucu açmadan bilgisayarınızdaki HTML, CSS ve
-    // görselleri (PNG/BMP/PPM) doğrudan diskten okur!
+    fetch_with_shield(url, false)
+}
+
+/// Anka Kalkan korumasıyla ağ isteği atar: `shield_enabled` açıksa bilinen reklam/izleyici
+/// alan adlarına soket dahi açmadan `Err(NetError::BlockedByShield)` döndürür.
+pub fn fetch_with_shield(url: &Url, shield_enabled: bool) -> Result<HttpResponse, NetError> {
     if url.scheme == "file" {
         return fetch_local_file(url);
     }
@@ -103,6 +110,10 @@ pub fn fetch(url: &Url) -> Result<HttpResponse, NetError> {
     let mut current_url = url.clone();
 
     for _ in 0..=MAX_REDIRECTS {
+        if shield_enabled && shield::is_blocked_url(&current_url) {
+            return Err(NetError::BlockedByShield(current_url.host));
+        }
+
         // Protokole göre tek bir HTTP/1.1 veya HTTPS/TLS 1.3 isteği at:
         let response = if current_url.scheme == "https" {
             #[cfg(windows)]
@@ -400,5 +411,12 @@ mod tests {
             yanit.body,
             "<html><body><h1>Merhaba Anka GZIP Testi! Merhaba Anka GZIP Testi!</h1></body></html>"
         );
+    }
+
+    #[test]
+    fn test_kalkan_ag_istegini_soket_acmadan_engeller() {
+        let tracker = Url::parse("https://www.googletagmanager.com/gtag/js?id=G-123").unwrap();
+        let sonuc = fetch_with_shield(&tracker, true);
+        assert!(matches!(sonuc, Err(NetError::BlockedByShield(_))));
     }
 }
