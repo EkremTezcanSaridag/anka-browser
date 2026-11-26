@@ -831,6 +831,7 @@ unsafe extern "system" fn wnd_proc(
                     && let Some(st) = guard.as_ref()
                 {
                     let face = to_wide("Segoe UI");
+                    let mono_face = to_wide("Consolas");
                     let scroll_y = st.state.scroll_y();
 
                     for komut in st.state.display_list() {
@@ -858,6 +859,12 @@ unsafe extern "system" fn wnd_proc(
                             0
                         };
 
+                        let active_face = if komut.tag == "code" {
+                            mono_face.as_ptr()
+                        } else {
+                            face.as_ptr()
+                        };
+
                         let font = CreateFontW(
                             -(komut.font_size as i32),
                             0,
@@ -872,7 +879,7 @@ unsafe extern "system" fn wnd_proc(
                             CLIP_DEFAULT_PRECIS,
                             CLEARTYPE_QUALITY,
                             DEFAULT_PITCH,
-                            face.as_ptr(),
+                            active_face,
                         );
                         let old_font = SelectObject(hdc, font as HGDIOBJ);
 

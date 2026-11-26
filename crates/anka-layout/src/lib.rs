@@ -65,6 +65,33 @@ pub struct LayoutBox {
     pub is_submit: bool,
 }
 
+/// CSS genişlik / maksimum genişlik ölçüsü (`px` veya `%`):
+#[derive(Clone, Copy)]
+enum SizeSpec {
+    Px(u32),
+    Percent(u32),
+}
+
+impl SizeSpec {
+    fn parse(val: &str) -> Option<Self> {
+        let temiz = val.split_whitespace().next()?.trim().to_lowercase();
+        if let Some(p) = temiz.strip_suffix('%') {
+            return p.trim().parse::<u32>().ok().map(SizeSpec::Percent);
+        }
+        if let Some(px) = temiz.strip_suffix("px") {
+            return px.trim().parse::<u32>().ok().map(SizeSpec::Px);
+        }
+        temiz.parse::<u32>().ok().map(SizeSpec::Px)
+    }
+
+    fn resolve(self, parent_width: u32) -> u32 {
+        match self {
+            SizeSpec::Px(px) => px,
+            SizeSpec::Percent(pct) => (parent_width * pct.min(100)) / 100,
+        }
+    }
+}
+
 /// Bir HTML düğümüne uygulanmış CSS özelliklerinin çözümlenmiş paketi:
 #[derive(Clone)]
 struct ResolvedStyle {
@@ -75,6 +102,8 @@ struct ResolvedStyle {
     padding: u32,
     margin: u32,
     gap: u32,
+    width: Option<SizeSpec>,
+    max_width: Option<SizeSpec>,
     display: String,
     text_align: String,
 }
@@ -89,52 +118,144 @@ impl Default for ResolvedStyle {
             padding: 0,
             margin: 0,
             gap: 12,
+            width: None,
+            max_width: None,
             display: "block".to_string(),
             text_align: "left".to_string(),
         }
     }
 }
 
+/// Birleştirici (combinator: `.menu a`, `div > p`) eşleştirme için ata düğüm kimliği:
+#[derive(Clone)]
+struct AncestorInfo {
+    tag: String,
+    id: Option<String>,
+    classes: Vec<String>,
+}
+
 /// Ağaçta yukarıdan aşağıya inerken ebeveyn etiketlerden miras alınan bağlam bilgisi:
 #[derive(Clone, Default)]
 struct NodeContext {
     tag: String,
-    id: Option<String>,
-    classes: Vec<String>,
-    inline_declarations: Vec<Declaration>,
     href: Option<String>,
     onclick: Option<String>,
     form_action: Option<String>,
     text_align: Option<String>,
+    inherited_color: Option<String>,
+    current_style: ResolvedStyle,
+    ancestors: Vec<AncestorInfo>,
     /// Üst kapsayıcı (örn: `.kart` veya `#duyuru`) zaten arka plan/çerçeve çizdiyse çocuk metinler tekrar çerçeve çizmez!
     container_painted_bg: bool,
+}
+
+fn single_selector_matches(token: &str, tag: &str, id: Option<&str>, classes: &[String]) -> bool {
+    let s = if let Some((base, pseudo)) = token.split_once(':') {
+        if matches!(pseudo, "link" | "visited") {
+            base
+        } else {
+            return false;
+        }
+    } else {
+        token
+    };
+    if s.is_empty() || s.contains('[') {
+        return false;
+    }
+    if s == "*" {
+        return true;
+    }
+    if let Some(cls) = s.strip_prefix('.') {
+        classes.iter().any(|c| c == cls)
+    } else if let Some(target_id) = s.strip_prefix('#') {
+        id == Some(target_id)
+    } else if let Some((t, cls)) = s.split_once('.') {
+        t == tag && classes.iter().any(|c| c == cls)
+    } else if let Some((t, target_id)) = s.split_once('#') {
+        t == tag && id == Some(target_id)
+    } else {
+        s == tag
+    }
+}
+
+fn selector_part_matches(
+    part: &str,
+    tag: &str,
+    id: Option<&str>,
+    classes: &[String],
+    ancestors: &[AncestorInfo],
+) -> bool {
+    let normalized = part.replace('>', " > ");
+    let tokens: Vec<&str> = normalized.split_whitespace().collect();
+    let Some(&last) = tokens.last() else {
+        return false;
+    };
+    if last == ">" || !single_selector_matches(last, tag, id, classes) {
+        return false;
+    }
+
+    let mut t_idx = tokens.len() - 1;
+    let mut a_idx = ancestors.len();
+
+    while t_idx > 0 {
+        t_idx -= 1;
+        if tokens[t_idx] == ">" {
+            if t_idx == 0 || a_idx == 0 {
+                return false;
+            }
+            t_idx -= 1;
+            a_idx -= 1;
+            let parent = &ancestors[a_idx];
+            if !single_selector_matches(
+                tokens[t_idx],
+                &parent.tag,
+                parent.id.as_deref(),
+                &parent.classes,
+            ) {
+                return false;
+            }
+        } else {
+            let mut matched = false;
+            while a_idx > 0 {
+                a_idx -= 1;
+                let anc = &ancestors[a_idx];
+                if single_selector_matches(
+                    tokens[t_idx],
+                    &anc.tag,
+                    anc.id.as_deref(),
+                    &anc.classes,
+                ) {
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                return false;
+            }
+        }
+    }
+
+    true
+}
+
+fn selector_matches_with_ancestors(
+    selector: &str,
+    tag: &str,
+    id: Option<&str>,
+    classes: &[String],
+    ancestors: &[AncestorInfo],
+) -> bool {
+    selector
+        .split(',')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .any(|part| selector_part_matches(part, tag, id, classes, ancestors))
 }
 
 /// Bir CSS seçicisinin (`h1`, `.kart`, `#baslik`, `div.kart`, `h1, h2`)
 /// o anki HTML düğümüyle eşleşip eşleşmediğini kontrol eder.
 pub fn selector_matches(selector: &str, tag: &str, id: Option<&str>, classes: &[String]) -> bool {
-    for part in selector.split(',') {
-        let s = part.trim();
-        if s.is_empty() {
-            continue;
-        }
-        if let Some(cls) = s.strip_prefix('.') {
-            if classes.iter().any(|c| c == cls) {
-                return true;
-            }
-        } else if let Some(target_id) = s.strip_prefix('#') {
-            if id == Some(target_id) {
-                return true;
-            }
-        } else if let Some((t, cls)) = s.split_once('.') {
-            if t == tag && classes.iter().any(|c| c == cls) {
-                return true;
-            }
-        } else if s == tag {
-            return true;
-        }
-    }
-    false
+    selector_matches_with_ancestors(selector, tag, id, classes, &[])
 }
 
 /// CSS `border: 1px solid #cbd5e1` veya `border-color: red` değerinden rengi ayıklar.
@@ -195,17 +316,31 @@ fn apply_declaration(decl: &Declaration, style: &mut ResolvedStyle) {
                 style.gap = px.min(48);
             }
         }
+        "width" => style.width = SizeSpec::parse(&decl.value),
+        "max-width" => style.max_width = SizeSpec::parse(&decl.value),
         "display" => style.display = decl.value.trim().to_lowercase(),
         "text-align" => style.text_align = decl.value.trim().to_lowercase(),
         _ => {}
     }
 }
 
-/// Belirli bir elementin (etiket + id + class + inline style) kendi doğrudan CSS stillerini hesaplar.
+fn effective_box_width(avail_width: u32, style: &ResolvedStyle) -> u32 {
+    let mut w = avail_width;
+    if let Some(spec) = style.width {
+        w = spec.resolve(avail_width).clamp(80, avail_width.max(80));
+    }
+    if let Some(max_spec) = style.max_width {
+        w = w.min(max_spec.resolve(avail_width).max(80));
+    }
+    w
+}
+
+/// Belirli bir elementin (etiket + id + class + atalar + inline style) kendi doğrudan CSS stillerini hesaplar.
 fn resolve_element_style(
     tag: &str,
     id: Option<&str>,
     classes: &[String],
+    ancestors: &[AncestorInfo],
     inline_decls: &[Declaration],
     rules: &[CssRule],
 ) -> ResolvedStyle {
@@ -221,7 +356,7 @@ fn resolve_element_style(
     };
 
     for rule in rules {
-        if selector_matches(&rule.selector, tag, id, classes) {
+        if selector_matches_with_ancestors(&rule.selector, tag, id, classes, ancestors) {
             for decl in &rule.declarations {
                 apply_declaration(decl, &mut style);
             }
@@ -289,9 +424,21 @@ pub fn wrap_text(text: &str, max_width: u32, font_size: u32) -> Vec<String> {
 /// Bir HTML sayfasının `<body>` etiketine uygulanan arka plan rengini (`background-color` / `background`)
 /// CSS kurallarından, satır içi `style="..."` veya `bgcolor="..."` özelliğinden çözer.
 pub fn resolve_body_background(root: &DomNode, rules: &[CssRule]) -> Option<String> {
+    let html_ancestors = vec![AncestorInfo {
+        tag: "html".to_string(),
+        id: None,
+        classes: Vec::new(),
+    }];
     if let Some(body) = find_body_node(root) {
         let (id, classes, inline) = extract_own_attrs(body);
-        let style = resolve_element_style("body", id.as_deref(), &classes, &inline, rules);
+        let style = resolve_element_style(
+            "body",
+            id.as_deref(),
+            &classes,
+            &html_ancestors,
+            &inline,
+            rules,
+        );
         if style.bg_color.is_some() {
             return style.bg_color;
         }
@@ -302,7 +449,7 @@ pub fn resolve_body_background(root: &DomNode, rules: &[CssRule]) -> Option<Stri
             }
         }
     }
-    let style = resolve_element_style("body", None, &[], &[], rules);
+    let style = resolve_element_style("body", None, &[], &html_ancestors, &[], rules);
     style.bg_color
 }
 
@@ -664,12 +811,13 @@ fn layout_node(
                 *last_inline_height = 0;
             }
 
-            // Elementin kendi doğrudan CSS özelliklerini (`display: flex`, `display: none`, `padding`, `margin`) çöz:
+            // Elementin kendi doğrudan CSS özelliklerini (`display: flex`, `width`, `max-width`, `padding`, `margin`) çöz:
             let (own_id, own_classes, own_inline) = extract_own_attrs(node);
-            let own_style = resolve_element_style(
+            let mut own_style = resolve_element_style(
                 tag_name,
                 own_id.as_deref(),
                 &own_classes,
+                &ctx.ancestors,
                 &own_inline,
                 rules,
             );
@@ -677,20 +825,34 @@ fn layout_node(
                 return;
             }
 
+            if own_style.color == "black" {
+                if let Some(parent_color) = &ctx.inherited_color {
+                    own_style.color = parent_color.clone();
+                } else if ctx.href.is_some() {
+                    own_style.color = "#1d4ed8".to_string();
+                }
+            }
+            if own_style.text_align == "left"
+                && let Some(parent_align) = &ctx.text_align
+            {
+                own_style.text_align = parent_align.clone();
+            }
+
+            let box_avail_w = effective_box_width(avail_width, &own_style);
+
             // Ebeveyn bağlamını miras alarak çocuklara aktarılacak `next_ctx` oluştur:
             let mut next_ctx = ctx.clone();
             next_ctx.tag = tag_name.clone();
-            if let Some(id_val) = own_id {
-                next_ctx.id = Some(id_val);
-            }
-            for c in own_classes {
-                if !next_ctx.classes.contains(&c) {
-                    next_ctx.classes.push(c);
-                }
-            }
-            next_ctx.inline_declarations.extend(own_inline);
+            next_ctx.ancestors.push(AncestorInfo {
+                tag: tag_name.clone(),
+                id: own_id,
+                classes: own_classes,
+            });
             if let Some(href_val) = node.get_attribute("href") {
                 next_ctx.href = Some(href_val.to_string());
+                if own_style.color == "black" {
+                    own_style.color = "#1d4ed8".to_string();
+                }
             }
             if let Some(onclick_val) = node.get_attribute("onclick") {
                 next_ctx.onclick = Some(onclick_val.to_string());
@@ -701,6 +863,9 @@ fn layout_node(
             }
             if own_style.text_align != "left" {
                 next_ctx.text_align = Some(own_style.text_align.clone());
+            }
+            if own_style.color != "black" {
+                next_ctx.inherited_color = Some(own_style.color.clone());
             }
 
             // Dış boşluk (margin-top) uygula:
@@ -723,9 +888,10 @@ fn layout_node(
                     let count = flex_items.len() as u32;
                     let gap = if is_table_row { 8 } else { own_style.gap };
                     let total_gaps = gap.saturating_mul(count.saturating_sub(1));
-                    let col_width = avail_width.saturating_sub(total_gaps) / count;
+                    let col_width = box_avail_w.saturating_sub(total_gaps) / count;
                     let start_y = *current_y;
                     let mut max_bottom_y = start_y;
+                    next_ctx.current_style = own_style.clone();
 
                     for (idx, item) in flex_items.iter().enumerate() {
                         let col_x = base_x + (idx as u32) * (col_width + gap);
@@ -781,7 +947,7 @@ fn layout_node(
                     text: String::new(),
                     x: base_x,
                     y: box_start_y,
-                    width: avail_width,
+                    width: box_avail_w,
                     height: 0,
                     color: own_style.color.clone(),
                     bg_color: own_style.bg_color.clone(),
@@ -798,9 +964,10 @@ fn layout_node(
                 });
 
                 next_ctx.container_painted_bg = true;
+                next_ctx.current_style = own_style.clone();
                 *current_y += pad;
                 let inner_x = base_x + pad;
-                let inner_w = avail_width.saturating_sub(pad * 2).max(80);
+                let inner_w = box_avail_w.saturating_sub(pad * 2).max(80);
                 let mut inner_inline_x = inner_x;
                 let mut inner_inline_h = 0;
 
@@ -834,6 +1001,8 @@ fn layout_node(
                 return;
             }
 
+            next_ctx.current_style = own_style.clone();
+
             // Normal blok / inline element çocuklarını gez:
             for child in &node.children {
                 layout_node(
@@ -842,7 +1011,7 @@ fn layout_node(
                     rules,
                     image_sizes,
                     base_x,
-                    avail_width,
+                    box_avail_w,
                     current_y,
                     inline_x,
                     last_inline_height,
@@ -862,22 +1031,10 @@ fn layout_node(
 
         NodeType::Text(text) => {
             let current_tag = ctx.tag.as_str();
-            let mut style = resolve_element_style(
-                current_tag,
-                ctx.id.as_deref(),
-                &ctx.classes,
-                &ctx.inline_declarations,
-                rules,
-            );
+            let mut style = ctx.current_style.clone();
 
             if ctx.href.is_some() && style.color == "black" {
                 style.color = "#1d4ed8".to_string();
-            }
-
-            if style.text_align == "left"
-                && let Some(parent_align) = &ctx.text_align
-            {
-                style.text_align = parent_align.clone();
             }
 
             // Ebeveyn `.kart` / `<div>` zaten kart arka planını çizdiyse, içindeki düz metin
@@ -1227,5 +1384,24 @@ mod tests {
         assert_eq!(kutular[1].tag, "strong");
         assert_eq!(kutular[1].href.as_deref(), Some("/en"));
         assert_eq!(kutular[1].color, "#1d4ed8");
+    }
+
+    #[test]
+    fn test_css_soy_cocuk_secicileri_ve_genislik() {
+        let html = "<body><div class=\"menu\"><a href=\"/1\">Menu Link</a></div><div class=\"kart\"><div><p>Torun</p></div><p>Cocuk</p></div></body>";
+        let css = ".menu a { color: red; } .kart > p { color: green; } .kart { background-color: #f8fafc; max-width: 300px; }";
+        let dom = parse_html(html);
+        let kurallar = parse_css(css);
+        let kutular = compute_layout(&dom, &kurallar, 800);
+
+        let menu_link = kutular.iter().find(|b| b.text == "Menu Link").unwrap();
+        let torun = kutular.iter().find(|b| b.text == "Torun").unwrap();
+        let cocuk = kutular.iter().find(|b| b.text == "Cocuk").unwrap();
+        let kart = kutular.iter().find(|b| b.tag == "div" && b.bg_color.is_some()).unwrap();
+
+        assert_eq!(menu_link.color, "red");
+        assert_eq!(torun.color, "black");
+        assert_eq!(cocuk.color, "green");
+        assert_eq!(kart.width, 300);
     }
 }
