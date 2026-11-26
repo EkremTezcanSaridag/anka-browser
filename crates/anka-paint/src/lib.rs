@@ -13,24 +13,75 @@ pub struct RgbColor {
 }
 
 impl RgbColor {
-    /// CSS renk adını (örn: "red") veya Hex kodunu (örn: "#ff5733")
-    /// bilgisayarın anlayacağı (R, G, B) piksel koduna çevirir.
+    /// CSS renk adını (örn: "red", "navy", "orange"), Hex kodunu ("#ff5733", "#0f0")
+    /// veya `rgb(...)` / `rgba(...)` fonksiyonunu (R, G, B) piksel değerine çevirir.
+    /// Saydam (`transparent` veya `alpha == 0`) ise `None` döndüren `try_from_css` yardımcı metodunu kullanır.
     pub fn from_css_name(name: &str) -> Self {
-        let temiz = name.trim().to_lowercase();
+        Self::try_from_css(name).unwrap_or(RgbColor { r: 0, g: 0, b: 0 })
+    }
 
-        // 1. DURUM: Renk '#' ile başlıyorsa Hex (16'lık taban) renk kodudur!
-        // Örn: "#ff5733" -> "ff" (255), "57" (87), "33" (51)
+    /// CSS renk ifadesini çözer; `transparent`, `none`, `rgba(..., 0)` veya
+    /// çözülemeyen karmaşık ifadeler (örn: `linear-gradient(...)`) için `None` döndürür.
+    /// Böylece bilinmeyen arka plan değerleri yanlışlıkla simsiyah boyanmaz!
+    pub fn try_from_css(name: &str) -> Option<Self> {
+        Self::try_from_css_inner(name, 0)
+    }
+
+    fn try_from_css_inner(name: &str, depth: usize) -> Option<Self> {
+        if depth > 4 {
+            return None;
+        }
+        let mut temiz = name.trim().to_lowercase();
+        if let Some(stripped) = temiz.strip_suffix("!important") {
+            temiz = stripped.trim().to_string();
+        }
+        if temiz.is_empty()
+            || matches!(
+                temiz.as_str(),
+                "transparent" | "none" | "inherit" | "initial" | "unset" | "currentcolor"
+            )
+        {
+            return None;
+        }
+
+        // `var(--ozellik, yedek_renk)` ifadelerinden yedek (fallback) rengi çıkar
+        if let Some(inner) = temiz.strip_prefix("var(").and_then(|s| s.strip_suffix(')'))
+            && let Some((_, fallback)) = inner.split_once(',')
+        {
+            return Self::try_from_css_inner(fallback, depth + 1);
+        }
+
+        if let Some(tek_renk) = Self::parse_single_color(&temiz) {
+            return Some(tek_renk);
+        }
+
+        // `background: url(/bg.png) no-repeat #f8f9fa` gibi çok parçalı shorthand ifadelerden rengi bul
+        if temiz.contains(char::is_whitespace) && !temiz.starts_with("rgb") {
+            for token in temiz.split_whitespace() {
+                if let Some(c) = Self::parse_single_color(token) {
+                    return Some(c);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn parse_single_color(temiz: &str) -> Option<Self> {
+        // 1. DURUM: `#hex` (6 haneli, 8 haneli veya 3 haneli)
         if let Some(hex) = temiz.strip_prefix('#') {
-            if hex.len() == 6
+            if (hex.len() == 6 || hex.len() == 8)
                 && let (Ok(r), Ok(g), Ok(b)) = (
                     u8::from_str_radix(&hex[0..2], 16),
                     u8::from_str_radix(&hex[2..4], 16),
                     u8::from_str_radix(&hex[4..6], 16),
                 )
             {
-                return RgbColor { r, g, b };
+                if hex.len() == 8 && &hex[6..8] == "00" {
+                    return None;
+                }
+                return Some(RgbColor { r, g, b });
             }
-            // Kısa 3 haneli Hex desteği (Örn: "#f00" -> "ff", "00", "00")
             if hex.len() == 3
                 && let (Ok(r), Ok(g), Ok(b)) = (
                     u8::from_str_radix(&hex[0..1], 16),
@@ -38,33 +89,79 @@ impl RgbColor {
                     u8::from_str_radix(&hex[2..3], 16),
                 )
             {
-                return RgbColor {
+                return Some(RgbColor {
                     r: r * 17,
                     g: g * 17,
                     b: b * 17,
-                };
+                });
             }
         }
 
-        // 2. DURUM: Standart İngilizce renk kelimeleri
-        match temiz.as_str() {
-            "red" => RgbColor { r: 220, g: 38, b: 38 },
-            "blue" => RgbColor { r: 37, g: 99, b: 235 },
-            "green" => RgbColor { r: 22, g: 163, b: 74 },
-            "yellow" => RgbColor { r: 234, g: 179, b: 8 },
-            "white" => RgbColor {
-                r: 255,
-                g: 255,
-                b: 255,
-            },
-            "gray" | "grey" => RgbColor {
-                r: 107,
-                g: 114,
-                b: 128,
-            },
-            // Varsayılan renk: Siyah
-            _ => RgbColor { r: 0, g: 0, b: 0 },
+        // 2. DURUM: `rgb(r, g, b)`, `rgba(r, g, b, a)` veya `rgb(r g b / a)`
+        if let Some(inner) = temiz
+            .strip_prefix("rgba(")
+            .or_else(|| temiz.strip_prefix("rgb("))
+            .and_then(|s| s.strip_suffix(')'))
+        {
+            let parts: Vec<&str> = inner
+                .split([',', ' ', '/'])
+                .filter(|p| !p.is_empty())
+                .collect();
+            if parts.len() >= 3
+                && let (Ok(r), Ok(g), Ok(b)) = (
+                    parts[0].trim().parse::<u8>(),
+                    parts[1].trim().parse::<u8>(),
+                    parts[2].trim().parse::<u8>(),
+                )
+            {
+                if parts.len() >= 4 {
+                    let alpha_str = parts[3].trim().trim_end_matches('%');
+                    if let Ok(a) = alpha_str.parse::<f32>()
+                        && a <= 0.0
+                    {
+                        return None;
+                    }
+                }
+                return Some(RgbColor { r, g, b });
+            }
         }
+
+        // 3. DURUM: Standart CSS İngilizce renk adları (bilinmeyen ifade kesinlikle `None` döner!)
+        let c = match temiz {
+            "red" => RgbColor { r: 220, g: 38, b: 38 },
+            "crimson" => RgbColor { r: 220, g: 20, b: 60 },
+            "blue" => RgbColor { r: 37, g: 99, b: 235 },
+            "navy" => RgbColor { r: 0, g: 0, b: 128 },
+            "skyblue" => RgbColor { r: 135, g: 206, b: 235 },
+            "green" => RgbColor { r: 22, g: 163, b: 74 },
+            "lime" => RgbColor { r: 0, g: 255, b: 0 },
+            "teal" => RgbColor { r: 0, g: 128, b: 128 },
+            "olive" => RgbColor { r: 128, g: 128, b: 0 },
+            "yellow" => RgbColor { r: 234, g: 179, b: 8 },
+            "gold" => RgbColor { r: 255, g: 215, b: 0 },
+            "orange" => RgbColor { r: 249, g: 115, b: 22 },
+            "coral" => RgbColor { r: 255, g: 127, b: 80 },
+            "purple" => RgbColor { r: 128, g: 0, b: 128 },
+            "rebeccapurple" => RgbColor { r: 102, g: 51, b: 153 },
+            "indigo" => RgbColor { r: 75, g: 0, b: 130 },
+            "violet" => RgbColor { r: 238, g: 130, b: 238 },
+            "pink" => RgbColor { r: 236, g: 72, b: 153 },
+            "magenta" | "fuchsia" => RgbColor { r: 255, g: 0, b: 255 },
+            "cyan" | "aqua" => RgbColor { r: 0, g: 255, b: 255 },
+            "brown" => RgbColor { r: 165, g: 42, b: 42 },
+            "maroon" => RgbColor { r: 128, g: 0, b: 0 },
+            "beige" => RgbColor { r: 245, g: 245, b: 220 },
+            "ivory" => RgbColor { r: 255, g: 255, b: 240 },
+            "white" => RgbColor { r: 255, g: 255, b: 255 },
+            "silver" => RgbColor { r: 192, g: 192, b: 192 },
+            "lightgray" | "lightgrey" => RgbColor { r: 211, g: 211, b: 211 },
+            "gray" | "grey" => RgbColor { r: 107, g: 114, b: 128 },
+            "darkgray" | "darkgrey" => RgbColor { r: 64, g: 64, b: 64 },
+            "slategray" | "slategrey" => RgbColor { r: 112, g: 128, b: 144 },
+            "black" => RgbColor { r: 0, g: 0, b: 0 },
+            _ => return None,
+        };
+        Some(c)
     }
 }
 
@@ -530,8 +627,8 @@ pub fn build_display_list(boxes: &[LayoutBox]) -> Vec<PaintCommand> {
             padding: b.padding,
             text_align: b.text_align.clone(),
             color: RgbColor::from_css_name(&b.color),
-            bg_color: b.bg_color.as_deref().map(RgbColor::from_css_name),
-            border_color: b.border_color.as_deref().map(RgbColor::from_css_name),
+            bg_color: b.bg_color.as_deref().and_then(RgbColor::try_from_css),
+            border_color: b.border_color.as_deref().and_then(RgbColor::try_from_css),
             href: b.href.clone(),
             image_src: b.image_src.clone(),
             image: None,
@@ -610,6 +707,39 @@ mod tests {
         assert_eq!(
             RgbColor::from_css_name("#0f0"),
             RgbColor { r: 0, g: 255, b: 0 }
+        );
+
+        // `rgb(...)`, `transparent` ve standart web renk adları
+        assert_eq!(
+            RgbColor::from_css_name("rgb(15, 23, 42)"),
+            RgbColor { r: 15, g: 23, b: 42 }
+        );
+        assert_eq!(
+            RgbColor::from_css_name("orange"),
+            RgbColor {
+                r: 249,
+                g: 115,
+                b: 22
+            }
+        );
+        assert_eq!(RgbColor::try_from_css("transparent"), None);
+        assert_eq!(RgbColor::try_from_css("rgba(0, 0, 0, 0)"), None);
+        assert_eq!(RgbColor::try_from_css("linear-gradient(#fff, #000)"), None);
+        assert_eq!(
+            RgbColor::try_from_css("var(--background-color-base, #ffffff)"),
+            Some(RgbColor {
+                r: 255,
+                g: 255,
+                b: 255
+            })
+        );
+        assert_eq!(
+            RgbColor::try_from_css("url(/logo.png) no-repeat #f8f9fa !important"),
+            Some(RgbColor {
+                r: 248,
+                g: 249,
+                b: 250
+            })
         );
     }
 

@@ -793,16 +793,25 @@ unsafe extern "system" fn wnd_proc(
                 FillRect(hdc, &toolbar_rect, toolbar_brush);
                 DeleteObject(toolbar_brush as HGDIOBJ);
 
-                // 2. Orta web sayfası tuvali (Bembeyaz)
+                // 2. Orta web sayfası tuvali (Sayfanın kendi `<body>` arka planı veya beyaz)
                 let page_rect = RECT {
                     left: 0,
                     top: TOOLBAR_HEIGHT,
                     right: client.right,
                     bottom: client.bottom - STATUS_HEIGHT,
                 };
-                let white_brush = CreateSolidBrush(rgb(255, 255, 255));
-                FillRect(hdc, &page_rect, white_brush);
-                DeleteObject(white_brush as HGDIOBJ);
+                let page_bg = DURUM
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().and_then(|st| st.state.page_bg()))
+                    .unwrap_or(anka_paint::RgbColor {
+                        r: 255,
+                        g: 255,
+                        b: 255,
+                    });
+                let bg_brush = CreateSolidBrush(rgb(page_bg.r, page_bg.g, page_bg.b));
+                FillRect(hdc, &page_rect, bg_brush);
+                DeleteObject(bg_brush as HGDIOBJ);
 
                 // 3. Alt durum çubuğu arka planı
                 let status_rect = RECT {
@@ -825,12 +834,29 @@ unsafe extern "system" fn wnd_proc(
                     let scroll_y = st.state.scroll_y();
 
                     for komut in st.state.display_list() {
-                        let weight = if matches!(komut.tag.as_str(), "h1" | "h2" | "h3") {
+                        let weight = if matches!(
+                            komut.tag.as_str(),
+                            "h1" | "h2" | "h3" | "strong" | "b"
+                        ) {
                             FW_BOLD
                         } else {
                             FW_NORMAL
                         };
-                        let underline = if komut.tag == "a" { 1 } else { 0 };
+                        let italic = if matches!(komut.tag.as_str(), "em" | "i") {
+                            1
+                        } else {
+                            0
+                        };
+                        let underline = if komut.tag == "a"
+                            || (komut.href.is_some()
+                                && !matches!(
+                                    komut.tag.as_str(),
+                                    "img" | "button" | "input" | "select"
+                                )) {
+                            1
+                        } else {
+                            0
+                        };
 
                         let font = CreateFontW(
                             -(komut.font_size as i32),
@@ -838,7 +864,7 @@ unsafe extern "system" fn wnd_proc(
                             0,
                             0,
                             weight,
-                            0,
+                            italic,
                             underline,
                             0,
                             DEFAULT_CHARSET,

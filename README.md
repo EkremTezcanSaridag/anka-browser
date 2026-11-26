@@ -89,6 +89,7 @@ Anka'nın çekirdek motoru bir web sayfasını aşağıdaki boru hattı (pipelin
   - [x] Çoklu sekme (`Multi-Tab`: `+ Sekme`, `x Kapat`, sekme geçişi) ve Yer İmleri (`Bookmarks`: `★ Yer İmi` ve `anka.local/yer-imleri`)
   - [x] `<img src="..." alt="...">` görsel kutu yerleşimi, saf Rust BMP/PPM + Linux `dlopen` `gdk-pixbuf` PNG/JPEG/WebP piksel çözümü ve Cairo/GDI çizimi
   - [x] Yerel dosya protokolü (`file://`), CSS Kutu Modeli (`padding`, `margin`, `text-align`), birleşik kart çerçeveleri ve CSS Flexbox (`display: flex`, `gap`)
+  - [x] Gerçek web uyumluluğu (`v0.2.9`): HTML yorum/entity/boolean/ham `<style>`, CSS yorum ve `@media` blok atlama, `rgb()`/`rgba()`/saydam renkler, `<body>` arka planı, `display: none`, `<br>`, `<table>`/`<tr>` yatay düzen, kalın/italik (`<strong>`, `<em>`) ve doğal en-boy oranlı `<img>` çizimi
 - [ ] **Faz 5 — JavaScript, Süreç İzolasyonu ve Güvenlik**
   - [x] Sıfırdan JavaScript motoru (`crates/anka-js`), canlı DOM API (`document.getElementById(...).innerText`, `style.*`, `document.title`) ve `<button onclick="...">` etkileşimi
   - [ ] Çok süreçli (Multi-process) sekme izolasyonu ve yerleşik izleyici/reklam engelleyici
@@ -107,8 +108,8 @@ cd anka-browser
 # Tüm çalışma alanını kontrol edin
 cargo check
 
-# Tüm modüllerin birim testlerini çalıştırın (anka-url, anka-net, anka-html, anka-css, anka-layout, anka-paint)
-cargo test
+# Tüm modüllerin birim testlerini çalıştırın (anka-url, anka-net, anka-html, anka-css, anka-layout, anka-paint, anka-js, anka-browser)
+cargo test --workspace
 
 # Dahili karşılama sayfasıyla motoru çalıştırın
 cargo run

@@ -7,9 +7,9 @@ use anka_html::{
     DomNode, extract_scripts, extract_styles, extract_stylesheet_links, extract_title, parse_html,
 };
 use anka_js::JsRuntime;
-use anka_layout::compute_layout;
+use anka_layout::{compute_layout, compute_layout_with_images, resolve_body_background};
 use anka_net::{fetch, parse_http_response};
-use anka_paint::{DecodedImage, PaintCommand, build_display_list};
+use anka_paint::{DecodedImage, PaintCommand, RgbColor, build_display_list};
 use anka_url::Url;
 
 #[cfg(any(windows, target_os = "linux", test))]
@@ -33,6 +33,7 @@ pub struct LoadedPage {
     pub js_runtime: JsRuntime,
     pub image_cache: HashMap<String, DecodedImage>,
     pub page_title: Option<String>,
+    pub page_bg: Option<RgbColor>,
     pub status_message: String,
     pub display_list: Vec<PaintCommand>,
     pub status_code: u16,
@@ -49,6 +50,7 @@ impl LoadedPage {
             js_runtime: JsRuntime::new(),
             image_cache: HashMap::new(),
             page_title: None,
+            page_bg: None,
             status_message: message,
             display_list: Vec::new(),
             status_code: 0,
@@ -70,7 +72,15 @@ impl LoadedPage {
             .clone()
             .or_else(|| extract_title(dom));
 
-        let yerlesim_kutulari = compute_layout(dom, &self.css_rules, viewport_width);
+        let image_sizes: HashMap<String, (u32, u32)> = self
+            .image_cache
+            .iter()
+            .map(|(k, img)| (k.clone(), (img.width, img.height)))
+            .collect();
+        let yerlesim_kutulari =
+            compute_layout_with_images(dom, &self.css_rules, viewport_width, &image_sizes);
+        self.page_bg = resolve_body_background(dom, &self.css_rules)
+            .and_then(|bg| RgbColor::try_from_css(&bg));
         let mut cizim_listesi = build_display_list(&yerlesim_kutulari);
 
         // Görselleri önbellekten bağla (yeniden ağdan indirmeye gerek yok!)
@@ -99,7 +109,7 @@ impl LoadedPage {
         };
 
         self.status_message = format!(
-            "{} {} | {} bayt | {} kutu | Telek Engine v0.2.8{}",
+            "{} {} | {} bayt | {} kutu | Telek Engine v0.2.9{}",
             protokol_etiketi,
             self.status_code,
             self.body_len,
@@ -232,6 +242,7 @@ fn yaniti_canli_sayfaya_donustur(
         js_runtime,
         image_cache,
         page_title: None,
+        page_bg: None,
         status_message: String::new(),
         display_list: Vec::new(),
         status_code: yanit.status_code,
@@ -271,7 +282,7 @@ pub fn motoru_calistir(hedef_adres: &str, viewport_width: u32) -> LoadedPage {
             ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; padding: 10px; font-size: 15px; }",
             "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; padding: 10px; font-size: 15px; }",
             "</style></head><body>",
-            "<h1>Anka Browser v0.2.8 — Telek Engine + Anka JS + Web Formlari!</h1>",
+            "<h1>Anka Browser v0.2.9 — Telek Engine + Gercek Web Siteleri!</h1>",
             "<nav>",
             "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
             "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
@@ -335,47 +346,58 @@ pub fn motoru_calistir(hedef_adres: &str, viewport_width: u32) -> LoadedPage {
 }
 
 fn main() {
-    let baslangic_adresi = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "http://anka.local/hosgeldiniz".to_string());
-
-    // Windows'ta doğrudan gerçek yerel masaüstü penceresini (Win32 GDI) aç!
-    #[cfg(windows)]
-    {
-        win32_gui::pencereyi_baslat(&baslangic_adresi);
-        return;
+    let mut headless = false;
+    let mut baslangic_adresi: Option<String> = None;
+    for arg in std::env::args().skip(1) {
+        if arg == "--headless" {
+            headless = true;
+        } else if baslangic_adresi.is_none() {
+            baslangic_adresi = Some(arg);
+        }
     }
+    let baslangic_adresi =
+        baslangic_adresi.unwrap_or_else(|| "http://anka.local/hosgeldiniz".to_string());
 
-    // Linux'ta (Milis, Ubuntu, Fedora, Arch vb.) masaüstü ekranı varsa yerel GTK3 + Cairo penceresini aç!
-    #[cfg(target_os = "linux")]
-    {
-        if linux_gui::pencereyi_baslat(&baslangic_adresi) {
+    if !headless {
+        // Windows'ta doğrudan gerçek yerel masaüstü penceresini (Win32 GDI) aç!
+        #[cfg(windows)]
+        {
+            win32_gui::pencereyi_baslat(&baslangic_adresi);
             return;
         }
+
+        // Linux'ta (Milis, Ubuntu, Fedora, Arch vb.) masaüstü ekranı varsa yerel GTK3 + Cairo penceresini aç!
+        #[cfg(target_os = "linux")]
+        {
+            if linux_gui::pencereyi_baslat(&baslangic_adresi) {
+                return;
+            }
+        }
     }
 
-    // Ekransız (Headless / CI) ortamda veya diğer platformlarda terminal önizlemesi çalışır
-    #[cfg(not(windows))]
-    {
-        let sayfa = motoru_calistir(&baslangic_adresi, 860);
+    // Ekransız (Headless / `--headless` / CI) ortamda terminal önizlemesi çalışır
+    let sayfa = motoru_calistir(&baslangic_adresi, 860);
+    println!(
+        "Anka Browser v0.2.9 ({}) [{}] | page_bg={:?} -> {}",
+        baslangic_adresi,
+        sayfa.page_title.as_deref().unwrap_or("Adsız"),
+        sayfa.page_bg,
+        sayfa.status_message
+    );
+    for komut in &sayfa.display_list {
         println!(
-            "Anka Browser v0.2.8 ({}) [{}] -> {}",
-            baslangic_adresi,
-            sayfa.page_title.as_deref().unwrap_or("Adsız"),
-            sayfa.status_message
+            "[x:{:>2}, y:{:>3}, w:{:>3}, h:{:>3} | {:>2}px | fg({:>3},{:>3},{:>3}) bg({:?})] <{}> {}",
+            komut.x,
+            komut.y,
+            komut.width,
+            komut.height,
+            komut.font_size,
+            komut.color.r,
+            komut.color.g,
+            komut.color.b,
+            komut.bg_color,
+            komut.tag,
+            komut.text
         );
-        for komut in &sayfa.display_list {
-            println!(
-                "[x:{:>2}, y:{:>3} | {:>2}px | RGB({:>3},{:>3},{:>3})] <{}> {}",
-                komut.x,
-                komut.y,
-                komut.font_size,
-                komut.color.r,
-                komut.color.g,
-                komut.color.b,
-                komut.tag,
-                komut.text
-            );
-        }
     }
 }
