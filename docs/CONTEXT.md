@@ -9,7 +9,7 @@ Bu doküman, geliştirme ortamı **Windows'tan Milis Linux'a** taşınırken Ant
 - **Motor Adı:** Telek Engine (*Anka kuşunun uçmasını sağlayan ana kanat tüyü*)
 - **GitHub Deposu:** `https://github.com/EkremTezcanSaridag/anka-browser`
 - **Dil & Yapı:** Rust (`edition = "2024"`, Cargo Workspace / Monorepo, Lisans: `MPL-2.0`)
-- **Mevcut Son Sürüm:** `v0.2.11` (50/50 birim testi başarılı, sıfır `clippy` uyarısı, sıfır üçüncü parti crate ve sıfır Linux `-dev` paketi bağımlılığı)
+- **Mevcut Son Sürüm:** `v0.3.0` (53/53 birim testi başarılı, sıfır `clippy` uyarısı, sıfır üçüncü parti crate ve sıfır Linux `-dev` paketi bağımlılığı)
 - **Temel Felsefe:** Hazır bir Chromium/WebKit/Gecko fork'u veya WebView kabuğu **değildir**. URL ayrıştırmadan ağ katmanına, HTML/DOM ağacından CSS, Layout ve Paint aşamasına kadar tüm boru hattı (pipeline) sıfırdan, eğitici ve anlaşılır Türkçe yorum satırlarıyla yazılmaktadır.
 
 ---
@@ -29,7 +29,7 @@ Bu doküman, geliştirme ortamı **Windows'tan Milis Linux'a** taşınırken Ant
 
 ## 3. Mevcut 7 İstasyonlu Mimari (`crates/`)
 
-| Modül | Mevcut Yetenekler (`v0.2.11` İtibarıyla) | Test Sayısı |
+| Modül | Mevcut Yetenekler (`v0.3.0` İtibarıyla) | Test Sayısı |
 | :--- | :--- | :---: |
 | **`crates/anka-url`** | `Url::parse` (scheme, host, port, path, query, fragment), `effective_port` (`http -> 80`, `https -> 443`), `file://` yerel dosya URL'leri ve `Url::resolve` (bağıl URL çözümleme). | 5 ✅ |
 | **`crates/anka-net`** | `HTTP/1.1` TCP istemcisi, `fetch_with_shield` + **`shield` (Anka Kalkan)**: soket açmadan reklam/izleyici domain engelleme, `utm_*`/`fbclid` parametre temizliği, 1x1 piksel/kozmetik reklam tespiti, yerel `file://`, saf Rust `GZIP / DEFLATE`, `301-308` yönlendirme, Windows WinHTTP + Linux `dlopen` TLS 1.3. | 10 ✅ |
@@ -38,7 +38,7 @@ Bu doküman, geliştirme ortamı **Windows'tan Milis Linux'a** taşınırken Ant
 | **`crates/anka-layout`** | `compute_layout_with_images` & `resolve_body_background`: soy/çocuk CSS seçici birleştiricileri (`.menu a`, `div > p`), `:link`/`:visited`, `width`/`max-width` (`px`/`%`), `display: none` / `hidden` / `<noscript>`/`<datalist>`/`<option>` atlama, `<br>`, `<table>`/`<tr>` yatay düzen, `<select>` tek kutulu açılır görünümü, doğal en-boy oranlı `<img>`, `<strong>`/`<b>`/`<em>`/`<i>`/`<code>`/`<small>` inline akışı, flexbox (`display: flex`, `gap`), `<form>`/`<input>`. | 11 ✅ |
 | **`crates/anka-paint`** | `build_display_list` & `RgbColor::try_from_css`: `transparent`/`none`/`rgba(..., 0)` saydamlık yönetimi, `var(--..., fallback)`, `!important`, `rgb()`/`rgba()`, 3/6/8 haneli Hex ve 30+ CSS renk adı; saf Rust BMP & PPM P6 + Linux `dlopen` `gdk-pixbuf` PNG/JPEG/GIF/WebP görsel çözümü. | 4 ✅ |
 | **`crates/anka-js`** | **7. İstasyon (Sıfırdan JS Motoru):** Kendi Lexer ve Evaluator'ı (`JsRuntime`), `let/const/var`, aritmetik/metin birleştirme, `if/else`, `function`, `console.log`, `document.title` ve canlı DOM güncellemesi (`document.getElementById(...).innerText` ve `style.*`). | 3 ✅ |
-| **`crates/anka-browser`** | `motoru_calistir_kalkanli` & `LoadedPage::run_inline_js`, **Anka Kalkan** (`Kalkan: Acik (N)` aç/kapat + `anka.local/kalkan`), `--headless` terminal teşhis modu, `page_bg`, Linux `dlopen` Pango/Cairo, Windows Win32 GDI, çoklu sekme, kalıcı yer imleri, HTML formları. | 6 ✅ |
+| **`crates/anka-browser`** | **Çok Süreçli (Multi-Process) Mimari** (`process_ipc.rs`: her sekme için ayrı `--renderer-worker` OS alt süreci, `stdin/stdout` pipe IPC, çökme izolasyonu & otomatik yeniden başlatma, PID gösterimi), **Anka Kalkan**, `--headless` teşhis modu, `page_bg`, Linux `dlopen` Pango/Cairo, Windows Win32 GDI, çoklu sekme, kalıcı yer imleri, HTML formları. | 9 ✅ |
 
 ---
 
