@@ -365,7 +365,7 @@ fn arayuzu_guncelle(api: &GtkCairoApi, app: &LinuxGuiApp) {
     }
 }
 
-fn adres_yukle(hedef: &str, gecmise_ekle: bool) {
+fn istegi_yukle(hedef: &str, post_body: Option<&str>, gecmise_ekle: bool) {
     let Some(api) = gtk_api() else { return };
     if let Ok(mut guard) = LINUX_APP.lock()
         && let Some(app) = guard.as_mut()
@@ -374,8 +374,24 @@ fn adres_yukle(hedef: &str, gecmise_ekle: bool) {
         if alloc_w > 300 {
             app.state.viewport_width = alloc_w as u32;
         }
-        app.state.navigate(hedef, gecmise_ekle);
+        if let Some(body) = post_body {
+            app.state.submit_post(hedef, body, gecmise_ekle);
+        } else {
+            app.state.navigate(hedef, gecmise_ekle);
+        }
         arayuzu_guncelle(api, app);
+    }
+}
+
+fn adres_yukle(hedef: &str, gecmise_ekle: bool) {
+    istegi_yukle(hedef, None, gecmise_ekle);
+}
+
+fn sayfa_eylemi_uygula(action: ClickAction) {
+    match action {
+        ClickAction::Navigate(yeni_url) => istegi_yukle(&yeni_url, None, true),
+        ClickAction::SubmitPost { url, body } => istegi_yukle(&url, Some(&body), true),
+        ClickAction::Redraw | ClickAction::None => {}
     }
 }
 
@@ -541,9 +557,7 @@ unsafe extern "C" fn on_canvas_button_press(
         ClickAction::None
     };
 
-    if let ClickAction::Navigate(yeni_url) = action {
-        adres_yukle(&yeni_url, true);
-    }
+    sayfa_eylemi_uygula(action);
 
     0
 }
@@ -561,7 +575,7 @@ unsafe extern "C" fn on_canvas_key_press(
         return 0;
     }
 
-    let mut submit_url: Option<String> = None;
+    let mut submit_action = ClickAction::None;
     let mut handled = false;
 
     if let Ok(mut guard) = LINUX_APP.lock()
@@ -571,7 +585,7 @@ unsafe extern "C" fn on_canvas_key_press(
         if keyval == GDK_KEY_BACKSPACE {
             handled = app.state.backspace_input();
         } else if keyval == GDK_KEY_RETURN || keyval == GDK_KEY_KP_ENTER {
-            submit_url = app.state.submit_focused_form();
+            submit_action = app.state.submit_focused_form();
             handled = true;
         } else {
             let uni = unsafe { (api.gdk_keyval_to_unicode)(keyval) };
@@ -588,9 +602,7 @@ unsafe extern "C" fn on_canvas_key_press(
         }
     }
 
-    if let Some(url) = submit_url {
-        adres_yukle(&url, true);
-    }
+    sayfa_eylemi_uygula(submit_action);
 
     if handled { 1 } else { 0 }
 }
@@ -758,10 +770,15 @@ unsafe extern "C" fn on_canvas_draw(
                             g: 23,
                             b: 42,
                         };
-                        if is_focused_input {
-                            format!("{typed}|")
+                        let visible = if komut.is_password {
+                            "\u{2022}".repeat(typed.chars().count())
                         } else {
                             typed.to_string()
+                        };
+                        if is_focused_input {
+                            format!("{visible}|")
+                        } else {
+                            visible
                         }
                     } else if is_focused_input {
                         "|".to_string()

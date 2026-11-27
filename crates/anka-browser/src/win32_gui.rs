@@ -290,7 +290,12 @@ fn pencereyi_yenile(hwnd: HWND, st: &PencereDurumu) {
     }
 }
 
-fn sayfayi_yukle_ve_yenile(hwnd: HWND, adres: &str, gecmise_ekle: bool) {
+fn sayfayi_istekle_yukle_ve_yenile(
+    hwnd: HWND,
+    adres: &str,
+    post_body: Option<&str>,
+    gecmise_ekle: bool,
+) {
     let mut rc = RECT {
         left: 0,
         top: 0,
@@ -306,8 +311,28 @@ fn sayfayi_yukle_ve_yenile(hwnd: HWND, adres: &str, gecmise_ekle: bool) {
         && let Some(st) = guard.as_mut()
     {
         st.state.viewport_width = viewport_w;
-        st.state.navigate(adres, gecmise_ekle);
+        if let Some(body) = post_body {
+            st.state.submit_post(adres, body, gecmise_ekle);
+        } else {
+            st.state.navigate(adres, gecmise_ekle);
+        }
         pencereyi_yenile(hwnd, st);
+    }
+}
+
+fn sayfayi_yukle_ve_yenile(hwnd: HWND, adres: &str, gecmise_ekle: bool) {
+    sayfayi_istekle_yukle_ve_yenile(hwnd, adres, None, gecmise_ekle);
+}
+
+fn win32_sayfa_eylemi_uygula(hwnd: HWND, action: ClickAction) {
+    match action {
+        ClickAction::Navigate(yeni_adres) => {
+            sayfayi_istekle_yukle_ve_yenile(hwnd, &yeni_adres, None, true);
+        }
+        ClickAction::SubmitPost { url, body } => {
+            sayfayi_istekle_yukle_ve_yenile(hwnd, &url, Some(&body), true);
+        }
+        ClickAction::Redraw | ClickAction::None => {}
     }
 }
 
@@ -763,15 +788,13 @@ unsafe extern "system" fn wnd_proc(
                 }
             };
 
-            if let ClickAction::Navigate(yeni_adres) = action {
-                sayfayi_yukle_ve_yenile(hwnd, &yeni_adres, true);
-            }
+            win32_sayfa_eylemi_uygula(hwnd, action);
             0
         }
 
         WM_CHAR => {
             let ch_code = wparam as u32;
-            let mut submit_url: Option<String> = None;
+            let mut submit_action = ClickAction::None;
             if let Ok(mut guard) = DURUM.lock()
                 && let Some(st) = guard.as_mut()
                 && st.state.focused_input().is_some()
@@ -779,7 +802,7 @@ unsafe extern "system" fn wnd_proc(
                 if ch_code == VK_BACK as u32 {
                     st.state.backspace_input();
                 } else if ch_code == VK_RETURN as u32 {
-                    submit_url = st.state.submit_focused_form();
+                    submit_action = st.state.submit_focused_form();
                 } else if let Some(ch) = char::from_u32(ch_code)
                     && !ch.is_control()
                 {
@@ -789,9 +812,7 @@ unsafe extern "system" fn wnd_proc(
                     InvalidateRect(hwnd, null(), 1);
                 }
             }
-            if let Some(url) = submit_url {
-                sayfayi_yukle_ve_yenile(hwnd, &url, true);
-            }
+            win32_sayfa_eylemi_uygula(hwnd, submit_action);
             0
         }
 
@@ -1016,10 +1037,15 @@ unsafe extern "system" fn wnd_proc(
                                         g: 23,
                                         b: 42,
                                     };
-                                    if is_focused_input {
-                                        format!("{typed}|")
+                                    let visible = if komut.is_password {
+                                        "\u{2022}".repeat(typed.chars().count())
                                     } else {
                                         typed.to_string()
+                                    };
+                                    if is_focused_input {
+                                        format!("{visible}|")
+                                    } else {
+                                        visible
                                     }
                                 } else if is_focused_input {
                                     "|".to_string()

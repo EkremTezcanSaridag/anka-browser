@@ -59,10 +59,12 @@ pub struct LayoutBox {
     // Eğer bu kutuda JavaScript tıklama olayı (`onclick="..."`) varsa çalıştırılacak JS kodu
     pub onclick: Option<String>,
 
-    // HTML `<form action="...">` içindeki metin kutusu (`<input name="...">`) ve gönderme (`submit`) bilgileri:
+    // HTML `<form action="..." method="GET|POST">` içindeki metin/şifre kutusu (`<input>`) ve gönderme bilgileri:
     pub input_name: Option<String>,
     pub form_action: Option<String>,
     pub is_submit: bool,
+    pub is_password: bool,
+    pub is_post_form: bool,
 }
 
 /// CSS genişlik / maksimum genişlik ölçüsü (`px` veya `%`):
@@ -141,6 +143,7 @@ struct NodeContext {
     href: Option<String>,
     onclick: Option<String>,
     form_action: Option<String>,
+    form_method_post: bool,
     text_align: Option<String>,
     inherited_color: Option<String>,
     current_style: ResolvedStyle,
@@ -586,6 +589,8 @@ fn layout_node(
                     input_name: None,
                     form_action: None,
                     is_submit: false,
+                    is_password: false,
+                    is_post_form: false,
                 });
 
                 *inline_x += box_w + 10;
@@ -631,6 +636,8 @@ fn layout_node(
                     input_name: None,
                     form_action: None,
                     is_submit: false,
+                    is_password: false,
+                    is_post_form: false,
                 });
                 *current_y += 18;
                 return;
@@ -704,6 +711,8 @@ fn layout_node(
                     input_name: None,
                     form_action: None,
                     is_submit: false,
+                    is_password: false,
+                    is_post_form: false,
                 });
 
                 *current_y += img_h + 14;
@@ -722,6 +731,7 @@ fn layout_node(
                 }
 
                 let is_submit = input_type == "submit" || input_type == "button";
+                let is_password = input_type == "password";
                 let value_attr = node.get_attribute("value").unwrap_or("").trim();
                 let placeholder = node.get_attribute("placeholder").unwrap_or("").trim();
                 let input_name = node
@@ -793,6 +803,8 @@ fn layout_node(
                     input_name: if is_submit { None } else { input_name },
                     form_action: ctx.form_action.clone(),
                     is_submit,
+                    is_password,
+                    is_post_form: ctx.form_method_post,
                 });
 
                 *inline_x += box_w + 10;
@@ -860,6 +872,9 @@ fn layout_node(
             if tag_name == "form" {
                 let action = node.get_attribute("action").unwrap_or("").trim().to_string();
                 next_ctx.form_action = Some(action);
+                next_ctx.form_method_post = node
+                    .get_attribute("method")
+                    .is_some_and(|m| m.trim().eq_ignore_ascii_case("post"));
             }
             if own_style.text_align != "left" {
                 next_ctx.text_align = Some(own_style.text_align.clone());
@@ -961,6 +976,8 @@ fn layout_node(
                     input_name: None,
                     form_action: None,
                     is_submit: false,
+                    is_password: false,
+                    is_post_form: false,
                 });
 
                 next_ctx.container_painted_bg = true;
@@ -1093,6 +1110,8 @@ fn layout_node(
                     is_submit: current_tag == "button"
                         && ctx.form_action.is_some()
                         && ctx.onclick.is_none(),
+                    is_password: false,
+                    is_post_form: ctx.form_method_post,
                 });
 
                 *inline_x += item_w + 12;
@@ -1151,6 +1170,8 @@ fn layout_node(
                     input_name: None,
                     form_action: None,
                     is_submit: false,
+                    is_password: false,
+                    is_post_form: false,
                 });
                 *current_y += pad;
             }
@@ -1193,6 +1214,8 @@ fn layout_node(
                     input_name: None,
                     form_action: None,
                     is_submit: false,
+                    is_password: false,
+                    is_post_form: false,
                 });
 
                 if idx + 1 < line_count {
@@ -1403,5 +1426,32 @@ mod tests {
         assert_eq!(torun.color, "black");
         assert_eq!(cocuk.color, "green");
         assert_eq!(kart.width, 300);
+    }
+
+    #[test]
+    fn test_post_form_ve_parola_input_ozellikleri() {
+        let html = "<body><form action=\"/oturum\" method=\"post\"><input type=\"text\" name=\"user\"><input type=\"password\" name=\"pw\"><input type=\"submit\" value=\"Giris\"></form></body>";
+        let dom = parse_html(html);
+        let kutular = compute_layout(&dom, &[], 800);
+
+        let user_box = kutular
+            .iter()
+            .find(|b| b.input_name.as_deref() == Some("user"))
+            .expect("user input kutusu");
+        let pw_box = kutular
+            .iter()
+            .find(|b| b.input_name.as_deref() == Some("pw"))
+            .expect("password input kutusu");
+        let submit_box = kutular
+            .iter()
+            .find(|b| b.is_submit)
+            .expect("submit butonu");
+
+        assert!(!user_box.is_password);
+        assert!(user_box.is_post_form);
+        assert!(pw_box.is_password);
+        assert!(pw_box.is_post_form);
+        assert!(submit_box.is_post_form);
+        assert_eq!(submit_box.form_action.as_deref(), Some("/oturum"));
     }
 }

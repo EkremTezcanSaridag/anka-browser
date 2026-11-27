@@ -1,10 +1,11 @@
 // Anka Browser - İşletim Sisteminden Bağımsız Ortak Tarayıcı Durumu (BrowserState)
 // Çok Süreçli (Multi-Process) Sekme İzolasyonu, Anka Kalkan, Kalıcı Yer İmleri,
-// Canlı JS `onclick` ve Etkileşimli HTML `<form>` / `<input>` Yönetimi (v0.3.0)
+// Oturum Çerezleri (CookieJar), HTTP POST ve Canlı HTML `<form>` / `<input>` Yönetimi (v0.3.1)
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use anka_net::cookies::CookieJar;
 use anka_paint::PaintCommand;
 use anka_url::Url;
 
@@ -14,8 +15,10 @@ use crate::process_ipc::{RenderSnapshot, TabWorkerClient};
 /// Kullanıcının web sayfası tuvaline tıkladığında tetiklenebilecek eylem türleri:
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClickAction {
-    /// Bir `<a href="...">` linkine veya `<form>` gönder butonuna tıklandı -> yeni adrese git!
+    /// Bir `<a href="...">` linkine veya GET `<form>` gönder butonuna tıklandı -> yeni adrese git!
     Navigate(String),
+    /// Bir `method="POST"` `<form>` gönderildi -> gövdeyle POST isteği at!
+    SubmitPost { url: String, body: String },
     /// Bir `<button onclick="...">` butonuna veya `<input>` kutusuna tıklandı -> ekran yeniden çizilmeli!
     Redraw,
     /// Boş bir yere tıklandı
@@ -59,6 +62,8 @@ pub struct BrowserState {
     pub viewport_width: u32,
     /// Anka Kalkan (Reklam & İzleyici Engelleyici) açık mı?
     pub shield_enabled: bool,
+    /// Tüm sekmeler arasında paylaşılan oturum ve HTTP çerez kavanozu
+    pub cookies: CookieJar,
     /// Yer imlerinin kaydedileceği dosya yolu (`None` ise disk kaydı yapılmaz — test izolasyonu için)
     bookmarks_file: Option<PathBuf>,
 }
@@ -182,7 +187,15 @@ impl BrowserState {
             temiz_url = cleaned;
         }
         let mut worker = TabWorkerClient::new(!cfg!(test));
-        let ilk_sayfa = worker.load_url(initial_address, viewport_width, shield_enabled);
+        let mut cookies = CookieJar::new();
+        let ilk_sayfa = worker.load_url(initial_address, viewport_width, shield_enabled, None);
+        if !ilk_sayfa.set_cookies.is_empty()
+            && let Ok(parsed) = Url::parse(&temiz_url)
+        {
+            for line in &ilk_sayfa.set_cookies {
+                cookies.store_header_line(&parsed, line);
+            }
+        }
 
         Self {
             tabs: vec![TabState {
@@ -199,6 +212,7 @@ impl BrowserState {
             bookmarks,
             viewport_width,
             shield_enabled,
+            cookies,
             bookmarks_file,
         }
     }
@@ -272,8 +286,8 @@ impl BrowserState {
     pub fn window_title(&self) -> String {
         let tab_info = format!("[Sekme {}/{}]", self.active_tab + 1, self.tabs.len());
         match &self.active().page.page_title {
-            Some(t) => format!("{t} {tab_info} — Anka Browser v0.3.0"),
-            None => format!("Anka Browser v0.3.0 {tab_info} — Telek Engine"),
+            Some(t) => format!("{t} {tab_info} — Anka Browser v0.3.1"),
+            None => format!("Anka Browser v0.3.1 {tab_info} — Telek Engine"),
         }
     }
 
@@ -314,14 +328,38 @@ impl BrowserState {
         }
     }
 
+    fn record_snapshot_cookies(&mut self, request_url: &str, set_cookies: &[String]) {
+        if !set_cookies.is_empty()
+            && let Ok(parsed) = Url::parse(request_url)
+        {
+            for line in set_cookies {
+                self.cookies.store_header_line(&parsed, line);
+            }
+        }
+    }
+
+    fn cookie_header_for_str(&self, raw_url: &str) -> Option<String> {
+        let norm = normalize_address(raw_url);
+        Url::parse(&norm)
+            .ok()
+            .and_then(|u| self.cookies.cookie_header_for(&u))
+    }
+
     pub fn new_tab(&mut self, initial_address: &str) -> usize {
         let mut clean_url = normalize_address(initial_address);
         if self.shield_enabled {
             let (cleaned, _) = anka_net::shield::strip_tracking_params(&clean_url);
             clean_url = cleaned;
         }
+        let cookie_hdr = self.cookie_header_for_str(&clean_url);
         let mut worker = TabWorkerClient::new(!cfg!(test));
-        let sayfa = worker.load_url(initial_address, self.viewport_width, self.shield_enabled);
+        let sayfa = worker.load_url(
+            initial_address,
+            self.viewport_width,
+            self.shield_enabled,
+            cookie_hdr.as_deref(),
+        );
+        self.record_snapshot_cookies(&clean_url, &sayfa.set_cookies);
         self.tabs.push(TabState {
             current_url: clean_url,
             page: sayfa,
@@ -431,7 +469,7 @@ impl BrowserState {
         )
     }
 
-    pub fn navigate(&mut self, raw_address: &str, push_history: bool) {
+    fn open_request(&mut self, raw_address: &str, post_body: Option<&str>, push_history: bool) {
         let mut clean_url = normalize_address(raw_address);
         if clean_url.is_empty() {
             return;
@@ -450,16 +488,30 @@ impl BrowserState {
 
         let viewport_w = self.viewport_width;
         let shield_on = self.shield_enabled;
-        let loaded = if clean_url == "http://anka.local/yer-imleri" {
+        let cookie_hdr = self.cookie_header_for_str(&clean_url);
+        let loaded = if let Some(body) = post_body {
+            self.active_mut().worker.post_url(
+                raw_address,
+                body,
+                viewport_w,
+                shield_on,
+                cookie_hdr.as_deref(),
+            )
+        } else if clean_url == "http://anka.local/yer-imleri" {
             let raw_http = self.build_bookmarks_http_response();
             self.active_mut()
                 .worker
                 .load_html(&clean_url, &raw_http, viewport_w, shield_on)
         } else {
-            self.active_mut()
-                .worker
-                .load_url(raw_address, viewport_w, shield_on)
+            self.active_mut().worker.load_url(
+                raw_address,
+                viewport_w,
+                shield_on,
+                cookie_hdr.as_deref(),
+            )
         };
+
+        self.record_snapshot_cookies(&clean_url, &loaded.set_cookies);
 
         let tab = self.active_mut();
         tab.current_url = clean_url;
@@ -467,6 +519,14 @@ impl BrowserState {
         tab.scroll_y = 0;
         tab.focused_input = None;
         tab.input_values.clear();
+    }
+
+    pub fn navigate(&mut self, raw_address: &str, push_history: bool) {
+        self.open_request(raw_address, None, push_history);
+    }
+
+    pub fn submit_post(&mut self, raw_address: &str, body: &str, push_history: bool) {
+        self.open_request(raw_address, Some(body), push_history);
     }
 
     pub fn go_back(&mut self) -> bool {
@@ -524,9 +584,7 @@ impl BrowserState {
         true
     }
 
-    /// Verilen `form_action` adresine sahip HTML `<form>` elemanını, içindeki `<input>`
-    /// değerlerini `?name=encoded_value` sorgu parametresi olarak ekleyip tam URL üretir!
-    pub fn build_form_submit_url(&self, action: &str) -> Option<String> {
+    fn collect_form_params(&self, action: &str) -> Vec<String> {
         let tab = self.active();
         let mut params = Vec::new();
         for komut in &tab.page.display_list {
@@ -545,19 +603,44 @@ impl BrowserState {
                 ));
             }
         }
+        params
+    }
 
+    fn resolve_form_target(&self, action: &str) -> Option<Url> {
+        let tab = self.active();
         let target_raw = if action.is_empty() {
             tab.current_url.as_str()
         } else {
             action
         };
         let base_url = Url::parse(&tab.current_url).ok()?;
-        let resolved = base_url.resolve(target_raw).ok()?;
+        base_url.resolve(target_raw).ok()
+    }
+
+    /// Formu `GET` (`Navigate`) veya `POST` (`SubmitPost`) olarak göndermek için tam eylemi oluşturur.
+    pub fn build_form_submit_action(&self, action: &str, is_post: bool) -> Option<ClickAction> {
+        let resolved = self.resolve_form_target(action)?;
         let port_part = resolved
             .port
             .map(|p| format!(":{p}"))
             .unwrap_or_default();
-        let query_joined = params.join("&");
+        let query_joined = self.collect_form_params(action).join("&");
+
+        if is_post {
+            let query_part = resolved
+                .query
+                .as_ref()
+                .map(|q| format!("?{q}"))
+                .unwrap_or_default();
+            return Some(ClickAction::SubmitPost {
+                url: format!(
+                    "{}://{}{}{}{}",
+                    resolved.scheme, resolved.host, port_part, resolved.path, query_part
+                ),
+                body: query_joined,
+            });
+        }
+
         let full_query = match (&resolved.query, query_joined.is_empty()) {
             (Some(existing), false) => format!("?{existing}&{query_joined}"),
             (Some(existing), true) => format!("?{existing}"),
@@ -565,23 +648,31 @@ impl BrowserState {
             (None, true) => String::new(),
         };
 
-        Some(format!(
+        Some(ClickAction::Navigate(format!(
             "{}://{}{}{}{}",
             resolved.scheme, resolved.host, port_part, resolved.path, full_query
-        ))
+        )))
     }
 
-    /// Odaklı `<input>` kutusunda `Enter` tuşuna basıldığında bağlı olduğu formu gönderir!
-    pub fn submit_focused_form(&self) -> Option<String> {
-        let focused = self.active().focused_input.as_deref()?;
-        let action = self
+    /// Odaklı `<input>` kutusunda `Enter` tuşuna basıldığında bağlı olduğu formu (`GET` veya `POST`) gönderir!
+    pub fn submit_focused_form(&self) -> ClickAction {
+        let Some(focused) = self.active().focused_input.as_deref() else {
+            return ClickAction::None;
+        };
+        let Some(cmd) = self
             .active()
             .page
             .display_list
             .iter()
             .find(|k| k.input_name.as_deref() == Some(focused))
-            .and_then(|k| k.form_action.as_deref())?;
-        self.build_form_submit_url(action)
+        else {
+            return ClickAction::None;
+        };
+        let Some(action) = cmd.form_action.as_deref() else {
+            return ClickAction::None;
+        };
+        self.build_form_submit_action(action, cmd.is_post_form)
+            .unwrap_or(ClickAction::None)
     }
 
     #[allow(dead_code)]
@@ -615,7 +706,7 @@ impl BrowserState {
     pub fn click_at(&mut self, canvas_x: i32, canvas_y: i32) -> ClickAction {
         let tab = self.active();
         let mut found_input: Option<String> = None;
-        let mut found_submit_action: Option<String> = None;
+        let mut found_submit: Option<(String, bool)> = None;
         let mut found_onclick: Option<String> = None;
         let mut found_href: Option<String> = None;
 
@@ -639,8 +730,10 @@ impl BrowserState {
                     break;
                 }
                 if komut.is_submit {
-                    found_submit_action =
-                        Some(komut.form_action.clone().unwrap_or_default());
+                    found_submit = Some((
+                        komut.form_action.clone().unwrap_or_default(),
+                        komut.is_post_form,
+                    ));
                     break;
                 }
                 if let Some(href) = &komut.href {
@@ -665,10 +758,10 @@ impl BrowserState {
             return ClickAction::Redraw;
         }
 
-        if let Some(action) = found_submit_action
-            && let Some(target_url) = self.build_form_submit_url(&action)
+        if let Some((action, is_post)) = found_submit
+            && let Some(submit_action) = self.build_form_submit_action(&action, is_post)
         {
-            return ClickAction::Navigate(target_url);
+            return submit_action;
         }
 
         if let Some(href) = found_href
@@ -832,12 +925,10 @@ mod tests {
         assert_eq!(state.input_value("search"), Some("Anka kusu"));
 
         // 3. Formu gönder -> `?search=Anka+kusu` URL'si üretilmeli!
-        let submit_url = state
-            .submit_focused_form()
-            .expect("Form URL olusturulmali");
+        let submit_action = state.submit_focused_form();
         assert_eq!(
-            submit_url,
-            "https://tr.wikipedia.org/w/index.php?search=Anka+kusu"
+            submit_action,
+            ClickAction::Navigate("https://tr.wikipedia.org/w/index.php?search=Anka+kusu".to_string())
         );
     }
 
@@ -897,5 +988,82 @@ mod tests {
         state.navigate("http://anka.local/hosgeldiniz", false);
         assert!(!state.active().page.crashed);
         assert!(state.active().page.pid > 0);
+    }
+
+    #[test]
+    fn test_oturum_post_ve_sekmeler_arasi_cerez_paylasimi() {
+        let mut state = BrowserState::new("http://anka.local/oturum", 860);
+        assert_eq!(state.cookies.count(), 0);
+
+        let user_box = state
+            .display_list()
+            .iter()
+            .find(|b| b.input_name.as_deref() == Some("kullanici"))
+            .expect("kullanici kutusu")
+            .clone();
+        let pw_box = state
+            .display_list()
+            .iter()
+            .find(|b| b.input_name.as_deref() == Some("sifre"))
+            .expect("sifre kutusu")
+            .clone();
+        assert!(pw_box.is_password);
+        assert!(pw_box.is_post_form);
+
+        assert_eq!(
+            state.click_at(user_box.x as i32 + 10, user_box.y as i32 + 5),
+            ClickAction::Redraw
+        );
+        for ch in "ekrem".chars() {
+            assert!(state.type_char(ch));
+        }
+
+        assert_eq!(
+            state.click_at(pw_box.x as i32 + 10, pw_box.y as i32 + 5),
+            ClickAction::Redraw
+        );
+        for ch in "gizli99".chars() {
+            assert!(state.type_char(ch));
+        }
+
+        let submit_action = state.submit_focused_form();
+        assert_eq!(
+            submit_action,
+            ClickAction::SubmitPost {
+                url: "http://anka.local/oturum".to_string(),
+                body: "kullanici=ekrem&sifre=gizli99".to_string(),
+            }
+        );
+
+        if let ClickAction::SubmitPost { url, body } = submit_action {
+            state.submit_post(&url, &body, true);
+        }
+
+        assert!(
+            state
+                .display_list()
+                .iter()
+                .any(|b| b.text.contains("Hos geldiniz, ekrem!"))
+        );
+        assert!(state.cookies.count() >= 2);
+
+        // Yeni bir sekme acinca Shared CookieJar sayesinde otomatik girisli gorunmeli!
+        state.new_tab("http://anka.local/oturum");
+        assert!(
+            state
+                .display_list()
+                .iter()
+                .any(|b| b.text.contains("Hos geldiniz, ekrem!"))
+        );
+
+        // Oturumu kapatinca (Max-Age=0) tekrar form gorunmeli:
+        state.navigate("http://anka.local/oturum-cikis", true);
+        state.navigate("http://anka.local/oturum", true);
+        assert!(
+            state
+                .display_list()
+                .iter()
+                .any(|b| b.input_name.as_deref() == Some("kullanici"))
+        );
     }
 }

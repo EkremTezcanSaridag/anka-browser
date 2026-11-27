@@ -1,4 +1,4 @@
-// Anka Browser - Çok Süreçli (Multi-Process) Sekme İzolasyonu ve Sıfır-Crate IPC (v0.3.0)
+// Anka Browser - Çok Süreçli (Multi-Process) Sekme İzolasyonu ve Sıfır-Crate IPC (v0.3.1)
 // Her tarayıcı sekmesi, tarayıcı ana penceresinden (`Browser Process`) ayrı bir
 // `--renderer-worker` işletim sistemi alt sürecinde (`Renderer Process`) çalışır.
 // Bir sekme çökerse diğer sekmeler ve tarayıcı penceresi hayatta kalır!
@@ -8,7 +8,7 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use anka_paint::{DecodedImage, PaintCommand, RgbColor};
 
-use crate::{LoadedPage, html_motoru_calistir_kalkanli, motoru_calistir_kalkanli};
+use crate::{LoadedPage, html_motoru_calistir_kalkanli, motoru_calistir_istekli};
 
 /// Bir sekmenin izole işçi sürecinden (`--renderer-worker`) ana arayüz sürecine
 /// gönderdiği eksiksiz çizim anlık görüntüsü (Snapshot):
@@ -23,6 +23,7 @@ pub struct RenderSnapshot {
     pub status_code: u16,
     pub body_len: usize,
     pub shield_blocked: usize,
+    pub set_cookies: Vec<String>,
 }
 
 impl RenderSnapshot {
@@ -37,6 +38,7 @@ impl RenderSnapshot {
             status_code: page.status_code,
             body_len: page.body_len,
             shield_blocked: page.shield_stats.total_blocked(),
+            set_cookies: page.set_cookies.clone(),
         }
     }
 
@@ -149,7 +151,7 @@ pub fn serialize_snapshot(snap: &RenderSnapshot) -> String {
     let title_enc = encode_opt_str_hex(snap.page_title.as_deref());
     let status_enc = encode_hex(snap.status_message.as_bytes());
     out.push_str(&format!(
-        "META\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        "META\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
         snap.pid,
         u8::from(snap.crashed),
         snap.status_code,
@@ -158,7 +160,8 @@ pub fn serialize_snapshot(snap: &RenderSnapshot) -> String {
         encode_opt_rgb(snap.page_bg),
         title_enc,
         status_enc,
-        snap.display_list.len()
+        snap.display_list.len(),
+        snap.set_cookies.len()
     ));
 
     for cmd in &snap.display_list {
@@ -171,7 +174,7 @@ pub fn serialize_snapshot(snap: &RenderSnapshot) -> String {
             ("0".to_string(), String::new())
         };
         out.push_str(&format!(
-            "CMD\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "CMD\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             cmd.x,
             cmd.y,
             cmd.width,
@@ -191,8 +194,13 @@ pub fn serialize_snapshot(snap: &RenderSnapshot) -> String {
             encode_opt_str_hex(cmd.onclick.as_deref()),
             encode_opt_str_hex(cmd.input_name.as_deref()),
             encode_opt_str_hex(cmd.form_action.as_deref()),
-            u8::from(cmd.is_submit)
+            u8::from(cmd.is_submit),
+            u8::from(cmd.is_password),
+            u8::from(cmd.is_post_form)
         ));
+    }
+    for cookie in &snap.set_cookies {
+        out.push_str(&format!("COOKIE\t{}\n", encode_hex(cookie.as_bytes())));
     }
     out.push_str("END\n");
     out
@@ -210,7 +218,7 @@ pub fn deserialize_snapshot<R: BufRead>(reader: &mut R) -> Result<RenderSnapshot
     }
 
     let meta_parts: Vec<&str> = header.trim_end_matches(['\r', '\n']).split('\t').collect();
-    if meta_parts.len() != 10 || meta_parts[0] != "META" {
+    if meta_parts.len() != 11 || meta_parts[0] != "META" {
         return Err("Gecersiz IPC META basligi".to_string());
     }
 
@@ -223,6 +231,7 @@ pub fn deserialize_snapshot<R: BufRead>(reader: &mut R) -> Result<RenderSnapshot
     let page_title = decode_opt_str_hex(meta_parts[7]);
     let status_message = decode_hex_string(meta_parts[8]).unwrap_or_default();
     let cmd_count = meta_parts[9].parse::<usize>().unwrap_or(0);
+    let cookie_count = meta_parts[10].parse::<usize>().unwrap_or(0);
 
     let mut display_list = Vec::with_capacity(cmd_count);
     for _ in 0..cmd_count {
@@ -234,7 +243,7 @@ pub fn deserialize_snapshot<R: BufRead>(reader: &mut R) -> Result<RenderSnapshot
             return Err("Alt surec veri aktarimi sirasinda sonlandi".to_string());
         }
         let p: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
-        if p.len() != 21 || p[0] != "CMD" {
+        if p.len() != 23 || p[0] != "CMD" {
             return Err("Bozuk IPC CMD satiri".to_string());
         }
 
@@ -276,7 +285,27 @@ pub fn deserialize_snapshot<R: BufRead>(reader: &mut R) -> Result<RenderSnapshot
             input_name: decode_opt_str_hex(p[18]),
             form_action: decode_opt_str_hex(p[19]),
             is_submit: p[20] == "1",
+            is_password: p[21] == "1",
+            is_post_form: p[22] == "1",
         });
+    }
+
+    let mut set_cookies = Vec::with_capacity(cookie_count);
+    for _ in 0..cookie_count {
+        let mut line = String::new();
+        let read_n = reader
+            .read_line(&mut line)
+            .map_err(|e| format!("IPC COOKIE okuma hatasi: {e}"))?;
+        if read_n == 0 {
+            return Err("Alt surec cerez aktarimi sirasinda sonlandi".to_string());
+        }
+        let hex = line
+            .trim_end_matches(['\r', '\n'])
+            .strip_prefix("COOKIE\t")
+            .ok_or_else(|| "Bozuk IPC COOKIE satiri".to_string())?;
+        if let Some(cookie_line) = decode_hex_string(hex) {
+            set_cookies.push(cookie_line);
+        }
     }
 
     let mut end_line = String::new();
@@ -297,6 +326,7 @@ pub fn deserialize_snapshot<R: BufRead>(reader: &mut R) -> Result<RenderSnapshot
         status_code,
         body_len,
         shield_blocked,
+        set_cookies,
     })
 }
 
@@ -320,7 +350,42 @@ impl WorkerState {
                 let vw = vw_s.parse::<u32>().unwrap_or(860);
                 let shield_on = *sh_s != "0";
                 let addr = decode_hex_string(addr_hex).unwrap_or_default();
-                let page = motoru_calistir_kalkanli(&addr, vw, shield_on);
+                let page = motoru_calistir_istekli(&addr, "GET", None, None, vw, shield_on);
+                let snap = RenderSnapshot::from_loaded_page(&page, pid);
+                self.current_page = Some(page);
+                Some(snap)
+            }
+            ["LOAD", vw_s, sh_s, addr_hex, cookie_hex] => {
+                let vw = vw_s.parse::<u32>().unwrap_or(860);
+                let shield_on = *sh_s != "0";
+                let addr = decode_hex_string(addr_hex).unwrap_or_default();
+                let cookie_opt = decode_opt_str_hex(cookie_hex);
+                let page = motoru_calistir_istekli(
+                    &addr,
+                    "GET",
+                    None,
+                    cookie_opt.as_deref(),
+                    vw,
+                    shield_on,
+                );
+                let snap = RenderSnapshot::from_loaded_page(&page, pid);
+                self.current_page = Some(page);
+                Some(snap)
+            }
+            ["POST", vw_s, sh_s, addr_hex, body_hex, cookie_hex] => {
+                let vw = vw_s.parse::<u32>().unwrap_or(860);
+                let shield_on = *sh_s != "0";
+                let addr = decode_hex_string(addr_hex).unwrap_or_default();
+                let body = decode_hex_string(body_hex).unwrap_or_default();
+                let cookie_opt = decode_opt_str_hex(cookie_hex);
+                let page = motoru_calistir_istekli(
+                    &addr,
+                    "POST",
+                    Some(&body),
+                    cookie_opt.as_deref(),
+                    vw,
+                    shield_on,
+                );
                 let snap = RenderSnapshot::from_loaded_page(&page, pid);
                 self.current_page = Some(page);
                 Some(snap)
@@ -546,12 +611,38 @@ impl TabWorkerClient {
         }
     }
 
-    pub fn load_url(&mut self, address: &str, viewport_width: u32, shield_enabled: bool) -> RenderSnapshot {
+    pub fn load_url(
+        &mut self,
+        address: &str,
+        viewport_width: u32,
+        shield_enabled: bool,
+        cookie_header: Option<&str>,
+    ) -> RenderSnapshot {
         let cmd = format!(
-            "LOAD\t{}\t{}\t{}\n",
+            "LOAD\t{}\t{}\t{}\t{}\n",
             viewport_width,
             u8::from(shield_enabled),
-            encode_hex(address.as_bytes())
+            encode_hex(address.as_bytes()),
+            encode_opt_str_hex(cookie_header)
+        );
+        self.send_command_line(&cmd, true)
+    }
+
+    pub fn post_url(
+        &mut self,
+        address: &str,
+        body: &str,
+        viewport_width: u32,
+        shield_enabled: bool,
+        cookie_header: Option<&str>,
+    ) -> RenderSnapshot {
+        let cmd = format!(
+            "POST\t{}\t{}\t{}\t{}\t{}\n",
+            viewport_width,
+            u8::from(shield_enabled),
+            encode_hex(address.as_bytes()),
+            encode_hex(body.as_bytes()),
+            encode_opt_str_hex(cookie_header)
         );
         self.send_command_line(&cmd, true)
     }
@@ -593,6 +684,8 @@ impl Drop for TabWorkerClient {
 mod tests {
     use std::io::Cursor;
 
+    use crate::motoru_calistir_kalkanli;
+
     use super::*;
 
     #[test]
@@ -632,5 +725,51 @@ mod tests {
         let mut empty = Cursor::new(Vec::<u8>::new());
         let res = deserialize_snapshot(&mut empty);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_ipc_post_ve_set_cookie_tasima() {
+        let mut worker = WorkerState::new();
+        let req = format!(
+            "POST\t860\t1\t{}\t{}\t0\n",
+            encode_hex(b"http://anka.local/oturum"),
+            encode_hex(b"kullanici=ekrem&sifre=1234")
+        );
+        let snap = worker
+            .process_request_line(&req)
+            .expect("POST istegi snapshot donmeli");
+        assert!(
+            snap.set_cookies
+                .iter()
+                .any(|c| c.contains("anka_user=ekrem"))
+        );
+
+        let wire = serialize_snapshot(&snap);
+        let mut cursor = Cursor::new(wire.into_bytes());
+        let decoded = deserialize_snapshot(&mut cursor).expect("POST snapshot cozulmeli");
+        assert_eq!(decoded.set_cookies, snap.set_cookies);
+        assert!(
+            decoded
+                .display_list
+                .iter()
+                .any(|b| b.text.contains("Hos geldiniz, ekrem!"))
+        );
+
+        // Parola kutusu ve POST form bayraklari GET /oturum icin de IPC uzerinden korunmali:
+        let get_req = format!(
+            "LOAD\t860\t1\t{}\t0\n",
+            encode_hex(b"http://anka.local/oturum")
+        );
+        let form_snap = worker.process_request_line(&get_req).unwrap();
+        let form_wire = serialize_snapshot(&form_snap);
+        let mut form_cursor = Cursor::new(form_wire.into_bytes());
+        let form_dec = deserialize_snapshot(&mut form_cursor).unwrap();
+        let pw_cmd = form_dec
+            .display_list
+            .iter()
+            .find(|c| c.input_name.as_deref() == Some("sifre"))
+            .expect("sifre kutusu olmali");
+        assert!(pw_cmd.is_password);
+        assert!(pw_cmd.is_post_form);
     }
 }
