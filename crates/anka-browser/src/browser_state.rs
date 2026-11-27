@@ -1,6 +1,6 @@
 // Anka Browser - İşletim Sisteminden Bağımsız Ortak Tarayıcı Durumu (BrowserState)
-// Çok Süreçli (Multi-Process) Sekme İzolasyonu, Anka Kalkan, Kalıcı Yer İmleri,
-// Oturum Çerezleri (CookieJar), HTTP POST ve Canlı HTML `<form>` / `<input>` Yönetimi (v0.3.1)
+// Çok Süreçli (Multi-Process) Sekme İzolasyonu, Anka Kalkan, Kalıcı Yer İmleri & Çerezler,
+// DevTools, Klavye Odak Geçişi ve Canlı HTML `<form>` / `<input>` Yönetimi (v0.3.2)
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -9,8 +9,8 @@ use anka_net::cookies::CookieJar;
 use anka_paint::PaintCommand;
 use anka_url::Url;
 
-use crate::normalize_address;
 use crate::process_ipc::{RenderSnapshot, TabWorkerClient};
+use crate::{html_escape, normalize_address};
 
 /// Kullanıcının web sayfası tuvaline tıkladığında tetiklenebilecek eylem türleri:
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,16 +66,15 @@ pub struct BrowserState {
     pub cookies: CookieJar,
     /// Yer imlerinin kaydedileceği dosya yolu (`None` ise disk kaydı yapılmaz — test izolasyonu için)
     bookmarks_file: Option<PathBuf>,
+    /// Kalıcı çerezlerin kaydedileceği dosya yolu (`None` ise disk kaydı yapılmaz)
+    cookies_file: Option<PathBuf>,
 }
 
-/// İşletim sistemine uygun standart kalıcı ayar dosyası yolunu döndürür:
-/// - Linux/Unix: `~/.config/anka-browser/bookmarks.tsv`
-/// - Windows: `%APPDATA%\anka-browser\bookmarks.tsv`
-pub fn default_bookmarks_path() -> Option<PathBuf> {
+fn default_config_file(filename: &str) -> Option<PathBuf> {
     if let Ok(appdata) = std::env::var("APPDATA")
         && !appdata.trim().is_empty()
     {
-        return Some(PathBuf::from(appdata).join("anka-browser").join("bookmarks.tsv"));
+        return Some(PathBuf::from(appdata).join("anka-browser").join(filename));
     }
     if let Ok(home) = std::env::var("HOME")
         && !home.trim().is_empty()
@@ -84,10 +83,20 @@ pub fn default_bookmarks_path() -> Option<PathBuf> {
             PathBuf::from(home)
                 .join(".config")
                 .join("anka-browser")
-                .join("bookmarks.tsv"),
+                .join(filename),
         );
     }
     None
+}
+
+/// İşletim sistemine uygun standart kalıcı yer imleri dosyası yolunu döndürür:
+pub fn default_bookmarks_path() -> Option<PathBuf> {
+    default_config_file("bookmarks.tsv")
+}
+
+/// İşletim sistemine uygun standart kalıcı çerez dosyası yolunu döndürür:
+pub fn default_cookies_path() -> Option<PathBuf> {
+    default_config_file("cookies.tsv")
 }
 
 /// Yer imlerini basit, insan tarafından okunabilir TSV (`baslik\turl`) metnine dönüştürür.
@@ -157,21 +166,32 @@ fn default_bookmarks() -> Vec<Bookmark> {
 }
 
 impl BrowserState {
-    /// Başlangıç adresi ve pencere genişliği ile ilk sekmeyi ve diskteki kalıcı yer imlerini yükler.
+    /// Başlangıç adresi ve pencere genişliği ile ilk sekmeyi ve diskteki kalıcı yer imleri/çerezleri yükler.
     pub fn new(initial_address: &str, viewport_width: u32) -> Self {
-        let storage_path = if cfg!(test) {
-            None
+        let (bookmarks_path, cookies_path) = if cfg!(test) {
+            (None, None)
         } else {
-            default_bookmarks_path()
+            (default_bookmarks_path(), default_cookies_path())
         };
-        Self::with_bookmarks_path(initial_address, viewport_width, storage_path)
+        Self::with_storage_paths(initial_address, viewport_width, bookmarks_path, cookies_path)
     }
 
     /// Belirli bir yer imi dosya yoluyla (gerçek disk veya test geçici dosyası) `BrowserState` başlatır.
+    #[cfg(test)]
     pub fn with_bookmarks_path(
         initial_address: &str,
         viewport_width: u32,
         bookmarks_file: Option<PathBuf>,
+    ) -> Self {
+        Self::with_storage_paths(initial_address, viewport_width, bookmarks_file, None)
+    }
+
+    /// Yer imi ve kalıcı çerez dosya yollarıyla (gerçek disk veya izole test dosyaları) `BrowserState` başlatır.
+    pub fn with_storage_paths(
+        initial_address: &str,
+        viewport_width: u32,
+        bookmarks_file: Option<PathBuf>,
+        cookies_file: Option<PathBuf>,
     ) -> Self {
         let bookmarks = bookmarks_file
             .as_ref()
@@ -180,15 +200,29 @@ impl BrowserState {
             .filter(|list| !list.is_empty())
             .unwrap_or_else(default_bookmarks);
 
+        let mut cookies = cookies_file
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|raw| CookieJar::deserialize_tsv(&raw))
+            .unwrap_or_default();
+
         let shield_enabled = true;
         let mut temiz_url = normalize_address(initial_address);
         if shield_enabled {
             let (cleaned, _) = anka_net::shield::strip_tracking_params(&temiz_url);
             temiz_url = cleaned;
         }
+        let init_cookie_hdr = Url::parse(&temiz_url)
+            .ok()
+            .and_then(|u| cookies.cookie_header_for(&u));
+
         let mut worker = TabWorkerClient::new(!cfg!(test));
-        let mut cookies = CookieJar::new();
-        let ilk_sayfa = worker.load_url(initial_address, viewport_width, shield_enabled, None);
+        let ilk_sayfa = worker.load_url(
+            initial_address,
+            viewport_width,
+            shield_enabled,
+            init_cookie_hdr.as_deref(),
+        );
         if !ilk_sayfa.set_cookies.is_empty()
             && let Ok(parsed) = Url::parse(&temiz_url)
         {
@@ -197,7 +231,7 @@ impl BrowserState {
             }
         }
 
-        Self {
+        let state = Self {
             tabs: vec![TabState {
                 current_url: temiz_url,
                 page: ilk_sayfa,
@@ -214,18 +248,37 @@ impl BrowserState {
             shield_enabled,
             cookies,
             bookmarks_file,
+            cookies_file,
+        };
+        state.persist_cookies();
+        state
+    }
+
+    fn write_config_file(path_opt: &Option<PathBuf>, content: &str) {
+        if let Some(path) = path_opt {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(path, content);
         }
     }
 
     /// Güncel yer imlerini diskteki `bookmarks.tsv` dosyasına kalıcı olarak yazar.
     fn persist_bookmarks(&self) {
-        if let Some(path) = &self.bookmarks_file {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let content = serialize_bookmarks(&self.bookmarks);
-            let _ = std::fs::write(path, content);
-        }
+        let content = serialize_bookmarks(&self.bookmarks);
+        Self::write_config_file(&self.bookmarks_file, &content);
+    }
+
+    /// Süresi dolmamış kalıcı çerezleri diskteki `cookies.tsv` dosyasına yazar.
+    fn persist_cookies(&self) {
+        let content = self.cookies.serialize_tsv();
+        Self::write_config_file(&self.cookies_file, &content);
+    }
+
+    /// Tüm çerezleri bellekten ve diskten temizler.
+    pub fn clear_cookies(&mut self) {
+        self.cookies.clear();
+        self.persist_cookies();
     }
 
     pub fn active(&self) -> &TabState {
@@ -286,8 +339,8 @@ impl BrowserState {
     pub fn window_title(&self) -> String {
         let tab_info = format!("[Sekme {}/{}]", self.active_tab + 1, self.tabs.len());
         match &self.active().page.page_title {
-            Some(t) => format!("{t} {tab_info} — Anka Browser v0.3.1"),
-            None => format!("Anka Browser v0.3.1 {tab_info} — Telek Engine"),
+            Some(t) => format!("{t} {tab_info} — Anka Browser v0.3.2"),
+            None => format!("Anka Browser v0.3.2 {tab_info} — Telek Engine"),
         }
     }
 
@@ -335,12 +388,14 @@ impl BrowserState {
             for line in set_cookies {
                 self.cookies.store_header_line(&parsed, line);
             }
+            self.persist_cookies();
         }
     }
 
     fn cookie_header_for_str(&self, raw_url: &str) -> Option<String> {
         let norm = normalize_address(raw_url);
-        Url::parse(&norm)
+        let stripped = norm.strip_prefix("view-source:").unwrap_or(&norm);
+        Url::parse(stripped)
             .ok()
             .and_then(|u| self.cookies.cookie_header_for(&u))
     }
@@ -469,6 +524,90 @@ impl BrowserState {
         )
     }
 
+    fn build_devtools_http_response(&self, inspected_url: &str, snap: &RenderSnapshot) -> String {
+        let mut cookie_html = String::new();
+        for c in self.cookies.all() {
+            let lifetime = if c.expires_epoch.is_some() {
+                "Kalici (Disk)"
+            } else {
+                "Oturum"
+            };
+            let mut flags = String::new();
+            if c.secure {
+                flags.push_str(" Secure");
+            }
+            if c.http_only {
+                flags.push_str(" HttpOnly");
+            }
+            cookie_html.push_str(&format!(
+                "<div class=\"kart\"><p>{} = {}</p><p>Alan: {}{} | Tur: {}{}</p></div>",
+                html_escape(&c.name),
+                html_escape(&c.value),
+                html_escape(&c.domain),
+                html_escape(&c.path),
+                lifetime,
+                flags
+            ));
+        }
+        if cookie_html.is_empty() {
+            cookie_html =
+                "<div id=\"duyuru\"><p>CookieJar su an bos. Oturum Testi sayfasindan POST ile giris yaparak kalici cerez olusturabilirsiniz.</p></div>"
+                    .to_string();
+        }
+
+        let mut logs_html = String::new();
+        for (i, line) in snap.js_logs.iter().enumerate() {
+            logs_html.push_str(&format!("<li>[{}] {}</li>", i + 1, html_escape(line)));
+        }
+        if logs_html.is_empty() {
+            logs_html = "<li>(Bu sayfada henuz JS console.log kaydi yok)</li>".to_string();
+        }
+
+        let safe_url = html_escape(inspected_url);
+        let source_target = if inspected_url.starts_with("view-source:") {
+            inspected_url.to_string()
+        } else {
+            format!("view-source:{inspected_url}")
+        };
+        let safe_source_url = html_escape(&source_target);
+
+        format!(
+            concat!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n",
+                "<html><head><title>Gelistirici Araclari (DevTools)</title><style>",
+                "h1 {{ color: #1e293b; background-color: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px; font-size: 26px; }}",
+                "h2 {{ color: #1d4ed8; font-size: 19px; }}",
+                "p, li {{ color: #334155; font-size: 15px; }}",
+                ".pill {{ color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; border-radius: 6px; font-size: 14px; }}",
+                ".cikis {{ color: #ffffff; background-color: #dc2626; border: 1px solid #b91c1c; border-radius: 6px; font-size: 14px; }}",
+                ".kart {{ color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 8px; font-size: 15px; }}",
+                "#duyuru {{ color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; border-radius: 8px; padding: 8px; font-size: 15px; }}",
+                ".konsol {{ color: #e2e8f0; background-color: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 10px; font-size: 14px; }}",
+                "</style></head><body>",
+                "<h1>Anka DevTools — Sekme &amp; Ag Mufettisi</h1>",
+                "<nav>",
+                "<a class=\"pill\" href=\"http://anka.local/hosgeldiniz\">Ana Sayfa</a>",
+                "<a class=\"pill\" href=\"{}\">Sayfa Kaynagini Gor (Ctrl+U)</a>",
+                "<a class=\"cikis\" href=\"http://anka.local/cerez-temizle\">Cerezleri Temizle</a>",
+                "</nav>",
+                "<div class=\"kart\"><p>Incelenen Adres: {} | Isci PID: {} | Anka Kalkan Engeli: {}</p></div>",
+                "<h2>1. JavaScript Konsol Ciktisi ({} Kayit)</h2>",
+                "<div class=\"konsol\"><ul>{}</ul></div>",
+                "<h2>2. Cookie Jar ({} Aktif Cerez)</h2>",
+                "{}",
+                "</body></html>"
+            ),
+            safe_source_url,
+            safe_url,
+            snap.pid,
+            snap.shield_blocked,
+            snap.js_logs.len(),
+            logs_html,
+            self.cookies.count(),
+            cookie_html
+        )
+    }
+
     fn open_request(&mut self, raw_address: &str, post_body: Option<&str>, push_history: bool) {
         let mut clean_url = normalize_address(raw_address);
         if clean_url.is_empty() {
@@ -482,8 +621,12 @@ impl BrowserState {
         let current_url_before = self.active().current_url.clone();
         if push_history && !current_url_before.is_empty() && current_url_before != clean_url {
             let tab = self.active_mut();
-            tab.history.push(current_url_before);
+            tab.history.push(current_url_before.clone());
             tab.forward_history.clear();
+        }
+
+        if clean_url == "http://anka.local/cerez-temizle" {
+            self.clear_cookies();
         }
 
         let viewport_w = self.viewport_width;
@@ -502,6 +645,32 @@ impl BrowserState {
             self.active_mut()
                 .worker
                 .load_html(&clean_url, &raw_http, viewport_w, shield_on)
+        } else if clean_url == "http://anka.local/gelistirici" {
+            let inspected_url = if current_url_before.is_empty() {
+                clean_url.clone()
+            } else {
+                current_url_before
+            };
+            let raw_http = self.build_devtools_http_response(&inspected_url, &self.active().page);
+            self.active_mut()
+                .worker
+                .load_html(&clean_url, &raw_http, viewport_w, shield_on)
+        } else if clean_url == "http://anka.local/cerez-temizle" {
+            let raw_http = concat!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n",
+                "<html><head><title>Cerezler Temizlendi</title><style>",
+                "h1 { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 8px; }",
+                ".pill { color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; border-radius: 6px; font-size: 15px; }",
+                "</style></head><body>",
+                "<h1>Tum Cerezler ve Kalici Oturumlar Temizlendi!</h1>",
+                "<p>CookieJar ve cookies.tsv sifirlandi.</p>",
+                "<nav><a class=\"pill\" href=\"http://anka.local/gelistirici\">Gelistirici Paneline Don</a>",
+                "<a class=\"pill\" href=\"http://anka.local/hosgeldiniz\">Ana Sayfa</a></nav>",
+                "</body></html>"
+            );
+            self.active_mut()
+                .worker
+                .load_html(&clean_url, raw_http, viewport_w, shield_on)
         } else {
             self.active_mut().worker.load_url(
                 raw_address,
@@ -582,6 +751,54 @@ impl BrowserState {
             val.pop();
         }
         true
+    }
+
+    /// Klavyeden `Tab` / `Shift+Tab` basıldığında sayfadaki `<input>` kutuları arasında odak geçişi yapar.
+    pub fn focus_next_input(&mut self, reverse: bool) -> bool {
+        let names: Vec<String> = self
+            .active()
+            .page
+            .display_list
+            .iter()
+            .filter_map(|k| k.input_name.clone())
+            .collect();
+        if names.is_empty() {
+            return false;
+        }
+
+        let next_idx = match self
+            .active()
+            .focused_input
+            .as_deref()
+            .and_then(|cur| names.iter().position(|n| n == cur))
+        {
+            Some(cur_idx) => {
+                if reverse {
+                    if cur_idx == 0 {
+                        names.len() - 1
+                    } else {
+                        cur_idx - 1
+                    }
+                } else {
+                    (cur_idx + 1) % names.len()
+                }
+            }
+            None => {
+                if reverse {
+                    names.len() - 1
+                } else {
+                    0
+                }
+            }
+        };
+
+        self.active_mut().focused_input = Some(names[next_idx].clone());
+        true
+    }
+
+    /// Odaktaki `<input>` seçimini temizler (`Escape`).
+    pub fn blur_input(&mut self) -> bool {
+        self.active_mut().focused_input.take().is_some()
     }
 
     fn collect_form_params(&self, action: &str) -> Vec<String> {
@@ -1064,6 +1281,88 @@ mod tests {
                 .display_list()
                 .iter()
                 .any(|b| b.input_name.as_deref() == Some("kullanici"))
+        );
+    }
+
+    #[test]
+    fn test_kalici_cerez_disk_kaydi_ve_yeniden_acilis() {
+        let cookies_path = std::env::temp_dir().join("anka_test_cookies_v032.tsv");
+        let _ = std::fs::remove_file(&cookies_path);
+
+        {
+            let mut state = BrowserState::with_storage_paths(
+                "http://anka.local/oturum",
+                860,
+                None,
+                Some(cookies_path.clone()),
+            );
+            state.submit_post("http://anka.local/oturum", "kullanici=demir&sifre=pw99", true);
+            assert!(
+                state
+                    .display_list()
+                    .iter()
+                    .any(|b| b.text.contains("Hos geldiniz, demir!"))
+            );
+        }
+
+        // Tarayici tamamen kapatilip ayni cookies.tsv ile yeniden acildiginda oturum hatirlanmali!
+        let mut reopened = BrowserState::with_storage_paths(
+            "http://anka.local/oturum",
+            860,
+            None,
+            Some(cookies_path.clone()),
+        );
+        assert!(
+            reopened
+                .display_list()
+                .iter()
+                .any(|b| b.text.contains("Hos geldiniz, demir!"))
+        );
+
+        // Cerezleri temizle rotasi hem bellegi hem diski sifirlamali:
+        reopened.navigate("http://anka.local/cerez-temizle", true);
+        assert_eq!(reopened.cookies.count(), 0);
+        let _ = std::fs::remove_file(&cookies_path);
+    }
+
+    #[test]
+    fn test_devtools_view_source_ve_tab_odak_gecisi() {
+        let mut state = BrowserState::new("http://anka.local/oturum", 860);
+        assert_eq!(state.focused_input(), None);
+
+        // Tab -> ilk alan (`kullanici`), tekrar Tab -> ikinci alan (`sifre`), Shift+Tab -> `kullanici`, Esc -> None:
+        assert!(state.focus_next_input(false));
+        assert_eq!(state.focused_input(), Some("kullanici"));
+        assert!(state.focus_next_input(false));
+        assert_eq!(state.focused_input(), Some("sifre"));
+        assert!(state.focus_next_input(true));
+        assert_eq!(state.focused_input(), Some("kullanici"));
+        assert!(state.blur_input());
+        assert_eq!(state.focused_input(), None);
+
+        // Ana sayfadaki JS konsol loglari DevTools'da gorunmeli:
+        state.navigate("http://anka.local/hosgeldiniz", true);
+        state.navigate("http://anka.local/gelistirici", true);
+        assert!(
+            state
+                .display_list()
+                .iter()
+                .any(|b| b.text.contains("Anka JS v0.3.2 baslatildi"))
+        );
+
+        // view-source: sayfanin ham HTML kaynağını satır numaralarıyla göstermeli:
+        state.navigate("view-source:http://anka.local/hosgeldiniz", true);
+        assert!(
+            state
+                .display_list()
+                .iter()
+                .any(|b| b.text.contains("Sayfa Kaynagi"))
+        );
+        assert!(
+            state
+                .display_list()
+                .iter()
+                .any(|b| b.text.contains("<html>"))
         );
     }
 }
