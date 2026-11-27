@@ -94,6 +94,7 @@ Anka'nın çekirdek motoru bir web sayfasını aşağıdaki boru hattı (pipelin
   - [x] Sıfırdan JavaScript motoru (`crates/anka-js`), canlı DOM API (`document.getElementById(...).innerText`, `style.*`, `document.title`) ve `<button onclick="...">` etkileşimi
   - [x] Yerleşik reklam ve izleyici engelleyici (**Anka Kalkan** `v0.2.11`: reklam/analitik alan adı engelleme, `utm_*`/`fbclid` izleme parametresi temizleme, 1x1 takip pikseli & kozmetik reklam temizliği ve aç/kapat sayacı)
   - [x] Çok süreçli (Multi-process) sekme izolasyonu (`v0.3.0`: her sekme ayrı `--renderer-worker` OS sürecinde çalışır; `stdin/stdout` pipe IPC, PID takibi ve çökme kurtarma)
+  - [x] Çerez kavanozu (`CookieJar`: `Set-Cookie`/`Cookie:`, `Domain`/`Path`/`Secure`/`Max-Age=0`), HTTP `POST` form gönderimi, maskeli `<input type="password">` (`•`) ve dahili `http://anka.local/oturum` oturum testi (`v0.3.1`)
 
 ---
 

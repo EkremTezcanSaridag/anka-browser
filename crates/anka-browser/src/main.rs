@@ -10,7 +10,7 @@ use anka_html::{
 use anka_js::JsRuntime;
 use anka_layout::{compute_layout, compute_layout_with_images, resolve_body_background};
 use anka_net::{
-    NetError, fetch_with_shield, parse_http_response,
+    NetError, fetch_request, fetch_with_shield, parse_http_response,
     shield::{self, ShieldStats},
 };
 use anka_paint::{DecodedImage, PaintCommand, RgbColor, build_display_list};
@@ -45,6 +45,7 @@ pub struct LoadedPage {
     pub status_code: u16,
     pub body_len: usize,
     pub shield_stats: ShieldStats,
+    pub set_cookies: Vec<String>,
 }
 
 impl LoadedPage {
@@ -63,6 +64,7 @@ impl LoadedPage {
             status_code: 0,
             body_len: 0,
             shield_stats: ShieldStats::default(),
+            set_cookies: Vec::new(),
         }
     }
 
@@ -123,7 +125,7 @@ impl LoadedPage {
         };
 
         self.status_message = format!(
-            "{} {} | {} bayt | {} kutu | Telek Engine v0.3.0{}{}",
+            "{} {} | {} bayt | {} kutu | Telek Engine v0.3.1{}{}",
             protokol_etiketi,
             self.status_code,
             self.body_len,
@@ -330,6 +332,13 @@ fn yaniti_canli_sayfaya_donustur(
         }
     }
 
+    let set_cookies: Vec<String> = yanit
+        .headers
+        .iter()
+        .filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
+        .map(|(_, v)| v.clone())
+        .collect();
+
     let mut page = LoadedPage {
         parsed_url: Some(url.clone()),
         dom: Some(dom_agaci),
@@ -343,6 +352,7 @@ fn yaniti_canli_sayfaya_donustur(
         status_code: yanit.status_code,
         body_len: yanit.body.len(),
         shield_stats,
+        set_cookies,
     };
     page.re_render(viewport_width);
     page
@@ -354,8 +364,181 @@ pub fn motoru_calistir(hedef_adres: &str, viewport_width: u32) -> LoadedPage {
     motoru_calistir_kalkanli(hedef_adres, viewport_width, true)
 }
 
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    out.push(byte);
+                    i += 3;
+                } else {
+                    out.push(b'%');
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn extract_form_field(body: &str, field_name: &str) -> String {
+    for pair in body.split('&') {
+        if let Some((raw_k, raw_v)) = pair.split_once('=')
+            && percent_decode(raw_k) == field_name
+        {
+            return percent_decode(raw_v);
+        }
+    }
+    String::new()
+}
+
+fn cookie_value(cookie_header: Option<&str>, name: &str) -> Option<String> {
+    let hdr = cookie_header?;
+    for part in hdr.split(';') {
+        let part = part.trim();
+        if let Some((k, v)) = part.split_once('=')
+            && k.trim() == name
+            && !v.trim().is_empty()
+        {
+            return Some(v.trim().to_string());
+        }
+    }
+    None
+}
+
+fn html_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn sanitize_cookie_value(input: &str) -> String {
+    input
+        .chars()
+        .filter(|ch| !matches!(ch, ';' | '\r' | '\n' | '\0'))
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn dahili_oturum_sayfasi(
+    method: &str,
+    post_body: Option<&str>,
+    cookie_header: Option<&str>,
+) -> String {
+    let mut uyari_mesaji: Option<&str> = None;
+    let mut extra_headers = String::new();
+
+    let aktif_kullanici = if method.eq_ignore_ascii_case("POST") {
+        let body = post_body.unwrap_or("");
+        let ham_kullanici = sanitize_cookie_value(&extract_form_field(body, "kullanici"));
+        let sifre = extract_form_field(body, "sifre");
+        if ham_kullanici.is_empty() || sifre.is_empty() {
+            uyari_mesaji =
+                Some("Lutfen hem kullanici adini hem de sifre alanini doldurup tekrar deneyin.");
+            cookie_value(cookie_header, "anka_user")
+        } else {
+            extra_headers = format!(
+                "Set-Cookie: anka_user={ham_kullanici}; Path=/\r\nSet-Cookie: anka_role=uye; Path=/\r\n"
+            );
+            Some(ham_kullanici)
+        }
+    } else {
+        cookie_value(cookie_header, "anka_user")
+    };
+
+    let icerik = if let Some(kullanici) = aktif_kullanici {
+        let guvenli_ad = html_escape(&kullanici);
+        let rol = cookie_value(cookie_header, "anka_role").unwrap_or_else(|| "uye".to_string());
+        let guvenli_rol = html_escape(&rol);
+        format!(
+            "<div class=\"basari\">\
+             <h2>Hos geldiniz, {guvenli_ad}!</h2>\
+             <p>Oturum cerezi (Cookie: anka_user={guvenli_ad}; anka_role={guvenli_rol}) tarayici kavanozuna kaydedildi.</p>\
+             <p>Yeni bir sekme (+ Sekme) acip http://anka.local/oturum adresine giderek farkli sekme sureclerinde oturumun korundugunu dogrulayabilirsiniz!</p>\
+             </div>\
+             <nav>\
+             <a class=\"pill\" href=\"http://anka.local/oturum\">Oturumu Yenile</a>\
+             <a class=\"cikis\" href=\"http://anka.local/oturum-cikis\">Oturumu Kapat (Max-Age=0)</a>\
+             <a class=\"pill\" href=\"http://anka.local/hosgeldiniz\">Ana Sayfaya Don</a>\
+             </nav>"
+        )
+    } else {
+        let uyari_html = match uyari_mesaji {
+            Some(msg) => format!("<div class=\"uyari\"><p>{msg}</p></div>"),
+            None => String::new(),
+        };
+        format!(
+            "{uyari_html}\
+             <div class=\"bilgi\">\
+             <p>Bu sayfa Anka Browser v0.3.1 ile gelen HTTP POST form gonderimi, maskeli parola kutusu (&lt;input type=\"password\"&gt;) ve Set-Cookie oturum kavanozunu test eder.</p>\
+             <p>Ipucu: Kullanici adi (orn. anka) ve sifrenizi (orn. 1234) yazip Enter'a veya dugmeye basin.</p>\
+             </div>\
+             <form action=\"http://anka.local/oturum\" method=\"POST\">\
+             <p><input type=\"text\" name=\"kullanici\" placeholder=\"Kullanici adiniz (orn. anka)...\"></p>\
+             <p><input type=\"password\" name=\"sifre\" placeholder=\"Sifreniz (maskeli gorunur)...\"></p>\
+             <input type=\"submit\" value=\"POST ile Giris Yap\">\
+             </form>\
+             <p><a class=\"pill\" href=\"http://anka.local/hosgeldiniz\">Ana Sayfaya Don</a></p>"
+        )
+    };
+
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n{extra_headers}\r\n\
+         <html><head><title>Anka Oturum Testi (POST &amp; Cookie)</title><style>\
+         h1 {{ color: #1e3a8a; background-color: #eff6ff; border: 1px solid #bfdbfe; padding: 8px; text-align: center; }}\
+         .bilgi {{ color: #1e293b; background-color: #f8fafc; border: 1px solid #cbd5e1; padding: 10px; }}\
+         .basari {{ color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; padding: 12px; }}\
+         .uyari {{ color: #991b1b; background-color: #fef2f2; border: 1px solid #ef4444; padding: 10px; }}\
+         .pill {{ color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; font-size: 15px; }}\
+         .cikis {{ color: #ffffff; background-color: #dc2626; border: 1px solid #b91c1c; font-size: 15px; }}\
+         </style></head><body>\
+         <h1>Anka Oturum &amp; HTTP POST Form Testi</h1>\
+         {icerik}\
+         </body></html>"
+    )
+}
+
 pub fn motoru_calistir_kalkanli(
     hedef_adres: &str,
+    viewport_width: u32,
+    shield_enabled: bool,
+) -> LoadedPage {
+    motoru_calistir_istekli(
+        hedef_adres,
+        "GET",
+        None,
+        None,
+        viewport_width,
+        shield_enabled,
+    )
+}
+
+pub fn motoru_calistir_istekli(
+    hedef_adres: &str,
+    method: &str,
+    post_body: Option<&str>,
+    cookie_header: Option<&str>,
     viewport_width: u32,
     shield_enabled: bool,
 ) -> LoadedPage {
@@ -377,6 +560,7 @@ pub fn motoru_calistir_kalkanli(
 
     // İSTASYON 2: anka-net (İnternetten, Yerel Diskten veya Dahili Sayfadan HTML İndirme)
     let yanit = if url.host == "anka.local" {
+        let oturum_sayfasi_str: String;
         let dahili_http = if url.path == "/kalkan" {
             concat!(
                 "HTTP/1.1 200 OK\r\n",
@@ -395,6 +579,26 @@ pub fn motoru_calistir_kalkanli(
                 "<p><a href=\"http://anka.local/hosgeldiniz\">Ana Sayfaya Don</a></p>",
                 "</body></html>"
             )
+        } else if url.path == "/oturum" {
+            oturum_sayfasi_str = dahili_oturum_sayfasi(method, post_body, cookie_header);
+            oturum_sayfasi_str.as_str()
+        } else if url.path == "/oturum-cikis" {
+            concat!(
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: text/html\r\n",
+                "Set-Cookie: anka_user=; Path=/; Max-Age=0\r\n",
+                "Set-Cookie: anka_role=; Path=/; Max-Age=0\r\n\r\n",
+                "<html><head><title>Oturum Kapatildi</title><style>",
+                "h1 { color: #991b1b; background-color: #fef2f2; border: 1px solid #fecaca; padding: 8px; text-align: center; }",
+                ".bilgi { color: #1e293b; background-color: #f8fafc; border: 1px solid #cbd5e1; padding: 10px; }",
+                ".pill { color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; font-size: 15px; }",
+                "</style></head><body>",
+                "<h1>Oturum Kapatildi!</h1>",
+                "<div class=\"bilgi\"><p>Max-Age=0 talimati ile anka_user cerezi tarayici kavanozundan temizlendi.</p></div>",
+                "<p><a class=\"pill\" href=\"http://anka.local/oturum\">Tekrar Giris Yap</a> ",
+                "<a class=\"pill\" href=\"http://anka.local/hosgeldiniz\">Ana Sayfaya Don</a></p>",
+                "</body></html>"
+            )
         } else {
             concat!(
                 "HTTP/1.1 200 OK\r\n",
@@ -411,10 +615,11 @@ pub fn motoru_calistir_kalkanli(
                 ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; padding: 10px; font-size: 15px; }",
                 "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; padding: 10px; font-size: 15px; }",
                 "</style></head><body>",
-                "<h1>Anka Browser v0.3.0 — Cok Surecli Sekme Izolasyonu + Anka Kalkan!</h1>",
+                "<h1>Anka Browser v0.3.1 — Cerezler, HTTP POST &amp; Parola Kutulari!</h1>",
                 "<nav>",
                 "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
                 "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
+                "<a class=\"pill\" href=\"http://anka.local/oturum\">Oturum Testi (POST/Cookie)</a>",
                 "<a class=\"pill\" href=\"http://anka.local/yer-imleri\">Kalici Yer Imlerim</a>",
                 "<a class=\"pill\" href=\"http://anka.local/kalkan\">Kalkan Testi</a>",
                 "<a class=\"pill\" href=\"http://anka.local/cokme-testi\">Cokme Testi</a>",
@@ -426,7 +631,7 @@ pub fn motoru_calistir_kalkanli(
                 "<input type=\"submit\" value=\"Vikipedi Ara\">",
                 "</form>",
                 "<img src=\"http://anka.local/anka-logo.bmp\" alt=\"Anka Telek Engine Piksel Amblemi\" width=\"380\" height=\"110\">",
-                "<h2>7. Istasyon (Anka JS), Anka Kalkan, Kalici Yer Imleri ve Canli Formlar!</h2>",
+                "<h2>7. Istasyon (Anka JS), Anka Kalkan, Cookie Jar ve Canli Formlar!</h2>",
                 "<div class=\"satir\">",
                 "<div class=\"kart\">",
                 "<p id=\"js_sayac\">Yukleniyor...</p>",
@@ -464,7 +669,7 @@ pub fn motoru_calistir_kalkanli(
             }
         }
     } else {
-        match fetch_with_shield(&url, shield_enabled) {
+        match fetch_request(&url, method, post_body, None, cookie_header, shield_enabled) {
             Ok(resp) => resp,
             Err(NetError::BlockedByShield(host)) => {
                 initial_stats.record_request(&host);
@@ -534,7 +739,7 @@ fn main() {
     // Ekransız (Headless / `--headless` / CI) ortamda terminal önizlemesi çalışır
     let sayfa = motoru_calistir(&baslangic_adresi, 860);
     println!(
-        "Anka Browser v0.3.0 ({}) [{}] | page_bg={:?} -> {}",
+        "Anka Browser v0.3.1 ({}) [{}] | page_bg={:?} -> {}",
         baslangic_adresi,
         sayfa.page_title.as_deref().unwrap_or("Adsız"),
         sayfa.page_bg,

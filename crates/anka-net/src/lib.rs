@@ -7,8 +7,11 @@ use std::net::TcpStream;
 // Böylece anka-net, anka-url'in parçaladığı adresleri anlayabilir.
 use anka_url::Url;
 
+pub mod cookies;
 mod gzip;
 pub mod shield;
+
+use cookies::CookieJar;
 
 #[cfg(windows)]
 mod winhttp_tls;
@@ -96,41 +99,109 @@ impl HttpResponse {
 /// Verilen `Url` adresine bağlanır (`http`, `https` veya yerel `file://`) ve sunucu `301 / 302 / 303 / 307 / 308`
 /// yönlendirme yanıtı dönerse `Location:` başlığını otomatik takip eder (en fazla 5 kez).
 pub fn fetch(url: &Url) -> Result<HttpResponse, NetError> {
-    fetch_with_shield(url, false)
+    fetch_request(url, "GET", None, None, None, false)
 }
 
 /// Anka Kalkan korumasıyla ağ isteği atar: `shield_enabled` açıksa bilinen reklam/izleyici
 /// alan adlarına soket dahi açmadan `Err(NetError::BlockedByShield)` döndürür.
 pub fn fetch_with_shield(url: &Url, shield_enabled: bool) -> Result<HttpResponse, NetError> {
+    fetch_request(url, "GET", None, None, None, shield_enabled)
+}
+
+/// Tam donanımlı HTTP/HTTPS isteği (`GET` veya `POST`, `Cookie:` başlığı, `Set-Cookie` kaydetme
+/// ve `Anka Kalkan` koruması dahil).
+pub fn fetch_request(
+    url: &Url,
+    method: &str,
+    post_body: Option<&str>,
+    mut cookies: Option<&mut CookieJar>,
+    cookie_override: Option<&str>,
+    shield_enabled: bool,
+) -> Result<HttpResponse, NetError> {
     if url.scheme == "file" {
         return fetch_local_file(url);
     }
 
     const MAX_REDIRECTS: usize = 5;
     let mut current_url = url.clone();
+    let mut current_method = method.to_uppercase();
+    let mut current_body = post_body.map(str::to_string);
+    // Worker modunda (cookies == None) yönlendirme zincirindeki Set-Cookie'leri kaybetmemek için
+    // ara çerezleri geçici kavanozda ve yanıt başlıkları listesinde biriktiririz.
+    let mut redirect_jar = cookies.is_none().then(cookies::CookieJar::new);
+    let mut redirect_set_cookies: Vec<(String, String)> = Vec::new();
 
     for _ in 0..=MAX_REDIRECTS {
         if shield_enabled && shield::is_blocked_url(&current_url) {
             return Err(NetError::BlockedByShield(current_url.host));
         }
 
+        let cookie_header = cookies
+            .as_deref()
+            .and_then(|jar| jar.cookie_header_for(&current_url))
+            .or_else(|| {
+                let hop_cookies = redirect_jar
+                    .as_ref()
+                    .and_then(|jar| jar.cookie_header_for(&current_url));
+                match (cookie_override, hop_cookies) {
+                    (Some(base), Some(hop)) if !base.is_empty() => Some(format!("{base}; {hop}")),
+                    (Some(base), _) if !base.is_empty() => Some(base.to_string()),
+                    (_, Some(hop)) => Some(hop),
+                    _ => None,
+                }
+            });
+
         // Protokole göre tek bir HTTP/1.1 veya HTTPS/TLS 1.3 isteği at:
-        let response = if current_url.scheme == "https" {
+        let mut response = if current_url.scheme == "https" {
             #[cfg(windows)]
             {
-                return winhttp_tls::fetch_https(&current_url);
+                let resp = winhttp_tls::request_https(
+                    &current_url,
+                    &current_method,
+                    cookie_header.as_deref(),
+                    current_body.as_deref(),
+                )?;
+                if let Some(jar) = cookies.as_deref_mut() {
+                    jar.store_from_headers(&current_url, &resp.headers);
+                }
+                return Ok(resp);
             }
             #[cfg(not(windows))]
             {
-                linux_tls::fetch_https_once(&current_url)?
+                linux_tls::request_https_once(
+                    &current_url,
+                    &current_method,
+                    cookie_header.as_deref(),
+                    current_body.as_deref(),
+                )?
             }
         } else {
-            fetch_once(&current_url)?
+            fetch_once_with_options(
+                &current_url,
+                &current_method,
+                cookie_header.as_deref(),
+                current_body.as_deref(),
+            )?
         };
 
-        // Sunucu "Bu sayfa taşındı (301/302/307/308)" dediyse ve zarfta "Location" varsa:
+        if let Some(jar) = cookies.as_deref_mut() {
+            jar.store_from_headers(&current_url, &response.headers);
+        } else if let Some(jar) = redirect_jar.as_mut() {
+            jar.store_from_headers(&current_url, &response.headers);
+        }
+
+        // Sunucu "Bu sayfa taşındı (301/302/303/307/308)" dediyse ve zarfta "Location" varsa:
         let is_redirect = matches!(response.status_code, 301 | 302 | 303 | 307 | 308);
         if is_redirect && let Some(location) = response.get_header("location") {
+            for (k, v) in &response.headers {
+                if k.eq_ignore_ascii_case("set-cookie") {
+                    redirect_set_cookies.push((k.clone(), v.clone()));
+                }
+            }
+            if matches!(response.status_code, 301..=303) && current_method == "POST" {
+                current_method = "GET".to_string();
+                current_body = None;
+            }
             // Yeni adresi (kısa/bağıl bile olsa) `anka-url::Url::resolve` ile tam adrese çevir
             current_url = current_url
                 .resolve(location)
@@ -139,12 +210,52 @@ pub fn fetch_with_shield(url: &Url, shield_enabled: bool) -> Result<HttpResponse
             continue;
         }
 
+        if !redirect_set_cookies.is_empty() {
+            redirect_set_cookies.extend(response.headers);
+            response.headers = redirect_set_cookies;
+        }
+
         // Yönlendirme yoksa (örn: 200 OK veya 404), cevabı doğrudan teslim et!
         return Ok(response);
     }
 
     // 5 yönlendirmeyi aştıysak sonsuz döngüye girmemek için dur!
     Err(NetError::TooManyRedirects)
+}
+
+/// HTTP/1.1 istek metnini (`GET` veya `POST`, `Cookie:` ve `Content-Length`) standart biçimde kurar.
+pub(crate) fn build_http_request(
+    method: &str,
+    url: &Url,
+    cookie_header: Option<&str>,
+    post_body: Option<&str>,
+    accept_gzip: bool,
+) -> String {
+    let request_path = match &url.query {
+        Some(q) => format!("{}?{}", url.path, q),
+        None => url.path.clone(),
+    };
+    let mut req = format!(
+        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: AnkaBrowser/0.3.1 (TelekEngine)\r\nAccept: text/html,application/xhtml+xml,text/css,image/*,*/*\r\n",
+        method, request_path, url.host
+    );
+    if accept_gzip {
+        req.push_str("Accept-Encoding: gzip\r\n");
+    }
+    if let Some(cookie) = cookie_header
+        && !cookie.is_empty()
+    {
+        req.push_str(&format!("Cookie: {cookie}\r\n"));
+    }
+    if let Some(body) = post_body {
+        req.push_str("Content-Type: application/x-www-form-urlencoded\r\n");
+        req.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    }
+    req.push_str("Connection: close\r\n\r\n");
+    if let Some(body) = post_body {
+        req.push_str(body);
+    }
+    req
 }
 
 /// Yerel diskteki bir dosyayı (`file:///...`) okuyarak standart bir `HttpResponse` (200 OK)
@@ -171,46 +282,30 @@ fn fetch_local_file(url: &Url) -> Result<HttpResponse, NetError> {
     })
 }
 
-/// Verilen `Url` adresine TCP üzerinden tek bir HTTP/1.1 GET isteği atar
+/// Verilen `Url` adresine TCP üzerinden tek bir HTTP/1.1 (`GET`/`POST`) isteği atar
 /// ve sunucudan dönen yanıtı `HttpResponse` paketi olarak döndürür.
-fn fetch_once(url: &Url) -> Result<HttpResponse, NetError> {
-    // 1. ADIM: Protokol kontrolü (Şimdilik düz "http" bağlantısını destekliyoruz)
+fn fetch_once_with_options(
+    url: &Url,
+    method: &str,
+    cookie_header: Option<&str>,
+    post_body: Option<&str>,
+) -> Result<HttpResponse, NetError> {
     if url.scheme != "http" {
         return Err(NetError::UnsupportedScheme(url.scheme.clone()));
     }
 
-    // 2. ADIM: Kapı numarasını (port) öğren (Örn: http için 80)
     let port = match url.effective_port() {
         Some(p) => p,
         None => return Err(NetError::MissingPort),
     };
 
-    // 3. ADIM: Sunucudan istenecek sayfa yolunu hazırla (Varsa ?query kısmını da ekle)
-    let request_path = match &url.query {
-        Some(q) => format!("{}?{}", url.path, q),
-        None => url.path.clone(),
-    };
-
-    // 4. ADIM: İşletim sisteminden TCP telefon hattını aç ve sunucuya bağlan!
-    // Sondaki `?` işareti: "Bağlanamazsan hatayı tercümana verip hemen çık" demektir.
     let mut stream = TcpStream::connect((url.host.as_str(), port))?;
-
-    // 5. ADIM: Sunucuya göndereceğimiz HTTP/1.1 mektubunu hazırla
-    // Her satır internet standardı gereği "\r\n" ile biter, en sonda boş bir "\r\n" olur.
-    let request = format!(
-        "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: AnkaBrowser/0.1\r\nConnection: close\r\n\r\n",
-        request_path, url.host
-    );
-
-    // Mektubu internet kablosundan karşı sunucuya gönder!
+    let request = build_http_request(method, url, cookie_header, post_body, false);
     stream.write_all(request.as_bytes())?;
 
-    // 6. ADIM: Sunucunun gönderdiği cevabı ham bayt (`Vec<u8>`) olarak sonuna kadar oku!
-    // (Böylece sadece metin değil, BMP/PNG/JPEG gibi ikili görsel dosyaları da bozulmadan indirilir!)
     let mut raw_response = Vec::new();
     stream.read_to_end(&mut raw_response)?;
 
-    // 7. ADIM: Gelen ham cevabı doğrayıp HttpResponse kutusuna yerleştir
     parse_http_response_bytes(&raw_response)
 }
 
@@ -418,5 +513,22 @@ mod tests {
         let tracker = Url::parse("https://www.googletagmanager.com/gtag/js?id=G-123").unwrap();
         let sonuc = fetch_with_shield(&tracker, true);
         assert!(matches!(sonuc, Err(NetError::BlockedByShield(_))));
+    }
+
+    #[test]
+    fn test_post_ve_cookie_istek_olusturma() {
+        let url = Url::parse("https://example.com/giris").unwrap();
+        let req = build_http_request(
+            "POST",
+            &url,
+            Some("anka_user=Ekrem"),
+            Some("kullanici=Ekrem&sifre=1234"),
+            true,
+        );
+        assert!(req.starts_with("POST /giris HTTP/1.1\r\n"));
+        assert!(req.contains("Cookie: anka_user=Ekrem\r\n"));
+        assert!(req.contains("Content-Type: application/x-www-form-urlencoded\r\n"));
+        assert!(req.contains("Content-Length: 26\r\n"));
+        assert!(req.ends_with("kullanici=Ekrem&sifre=1234"));
     }
 }

@@ -118,31 +118,30 @@ impl Drop for TlsGuard {
 }
 
 /// Verilen `https://` adresine Linux'un yerleşik OpenSSL (`libssl.so`) motoru üzerinden
-/// tek bir güvenli HTTP/1.1 GET isteği atar ve yanıtı `HttpResponse` olarak döndürür.
-pub fn fetch_https_once(url: &Url) -> Result<HttpResponse, NetError> {
+/// güvenli HTTP/1.1 `GET` veya `POST` isteği atar ve yanıtı `HttpResponse` olarak döndürür.
+pub fn request_https_once(
+    url: &Url,
+    method: &str,
+    cookie_header: Option<&str>,
+    post_body: Option<&str>,
+) -> Result<HttpResponse, NetError> {
     let api = openssl_api().ok_or(NetError::InvalidResponse)?;
 
     // 1. ADIM: Kapı numarasını (port) al (https için varsayılan: 443)
     let port = url.effective_port().ok_or(NetError::MissingPort)?;
 
-    // 2. ADIM: İstek yolunu hazırla (Varsa ?query kısmını ekle)
-    let request_path = match &url.query {
-        Some(q) => format!("{}?{}", url.path, q),
-        None => url.path.clone(),
-    };
-
-    // 3. ADIM: İşletim sisteminden standart TCP soketini aç (Henüz şifresiz ham hat)
+    // 2. ADIM: İşletim sisteminden standart TCP soketini aç (Henüz şifresiz ham hat)
     let stream = TcpStream::connect((url.host.as_str(), port))?;
     let c_host = CString::new(url.host.as_str()).map_err(|_| NetError::InvalidResponse)?;
 
     unsafe {
         // 4. ADIM: OpenSSL TLS motorunu başlat
-        let method = (api.tls_client_method)();
-        if method.is_null() {
+        let tls_method = (api.tls_client_method)();
+        if tls_method.is_null() {
             return Err(NetError::InvalidResponse);
         }
 
-        let ctx = (api.ssl_ctx_new)(method);
+        let ctx = (api.ssl_ctx_new)(tls_method);
         if ctx.is_null() {
             return Err(NetError::InvalidResponse);
         }
@@ -176,11 +175,8 @@ pub fn fetch_https_once(url: &Url) -> Result<HttpResponse, NetError> {
             return Err(NetError::InvalidResponse);
         }
 
-        // 8. ADIM: Şifreli tünelin içinden HTTP/1.1 GET mektubumuzu gönder!
-        let request = format!(
-            "GET {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: AnkaBrowser/0.2.8 (Linux; TelekEngine)\r\nAccept: text/html,application/xhtml+xml,text/css,image/*,*/*\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n",
-            request_path, url.host
-        );
+        // 8. ADIM: Şifreli tünelin içinden HTTP/1.1 mektubumuzu gönder!
+        let request = crate::build_http_request(method, url, cookie_header, post_body, true);
 
         let req_bytes = request.as_bytes();
         let mut total_written = 0;

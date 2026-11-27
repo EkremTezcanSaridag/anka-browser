@@ -19,6 +19,7 @@ type BOOL = i32;
 const WINHTTP_ACCESS_TYPE_DEFAULT_PROXY: DWORD = 0;
 const WINHTTP_FLAG_SECURE: DWORD = 0x0080_0000;
 const WINHTTP_QUERY_STATUS_CODE: DWORD = 19;
+const WINHTTP_QUERY_SET_COOKIE: DWORD = 43;
 const WINHTTP_QUERY_FLAG_NUMBER: DWORD = 0x2000_0000;
 
 #[link(name = "winhttp")]
@@ -79,8 +80,13 @@ fn to_wide(s: &str) -> Vec<u16> {
 }
 
 /// Verilen `https://` adresine Windows'un yerleşik TLS 1.3 motoru (`winhttp`)
-/// üzerinden güvenli bağlantı kurar ve sayfanın HTML içeriğini indirir.
-pub fn fetch_https(url: &Url) -> Result<HttpResponse, NetError> {
+/// üzerinden güvenli `GET` veya `POST` isteği kurar; çerez gönderir ve `Set-Cookie` başlıklarını okur.
+pub fn request_https(
+    url: &Url,
+    method: &str,
+    cookie_header: Option<&str>,
+    post_body: Option<&str>,
+) -> Result<HttpResponse, NetError> {
     let port = url.effective_port().ok_or(NetError::MissingPort)?;
     let path_and_query = match &url.query {
         Some(q) => format!("{}?{}", url.path, q),
@@ -88,7 +94,7 @@ pub fn fetch_https(url: &Url) -> Result<HttpResponse, NetError> {
     };
 
     unsafe {
-        let agent = to_wide("AnkaBrowser/0.2");
+        let agent = to_wide("AnkaBrowser/0.3.1");
         let h_session = WinHttpOpen(
             agent.as_ptr(),
             WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -107,7 +113,7 @@ pub fn fetch_https(url: &Url) -> Result<HttpResponse, NetError> {
             return Err(NetError::InvalidResponse);
         }
 
-        let verb_w = to_wide("GET");
+        let verb_w = to_wide(method);
         let path_w = to_wide(&path_and_query);
         let h_request = WinHttpOpenRequest(
             h_connect,
@@ -124,7 +130,40 @@ pub fn fetch_https(url: &Url) -> Result<HttpResponse, NetError> {
             return Err(NetError::InvalidResponse);
         }
 
-        let sent = WinHttpSendRequest(h_request, null(), 0, null_mut(), 0, 0, 0);
+        let mut extra_headers = String::new();
+        if let Some(cookie) = cookie_header
+            && !cookie.is_empty()
+        {
+            extra_headers.push_str(&format!("Cookie: {cookie}\r\n"));
+        }
+        if post_body.is_some() {
+            extra_headers.push_str("Content-Type: application/x-www-form-urlencoded\r\n");
+        }
+        let extra_w = if extra_headers.is_empty() {
+            None
+        } else {
+            Some(to_wide(&extra_headers))
+        };
+        let (hdr_ptr, hdr_len) = match &extra_w {
+            Some(w) => (w.as_ptr(), (w.len() - 1) as DWORD),
+            None => (null(), 0),
+        };
+        let mut body_buf = post_body.map(|b| b.as_bytes().to_vec()).unwrap_or_default();
+        let (body_ptr, body_len) = if body_buf.is_empty() {
+            (null_mut(), 0)
+        } else {
+            (body_buf.as_mut_ptr().cast::<c_void>(), body_buf.len() as DWORD)
+        };
+
+        let sent = WinHttpSendRequest(
+            h_request,
+            hdr_ptr,
+            hdr_len,
+            body_ptr,
+            body_len,
+            body_len,
+            0,
+        );
         if sent == 0 || WinHttpReceiveResponse(h_request, null_mut()) == 0 {
             WinHttpCloseHandle(h_request);
             WinHttpCloseHandle(h_connect);
@@ -143,6 +182,32 @@ pub fn fetch_https(url: &Url) -> Result<HttpResponse, NetError> {
             &mut status_size,
             null_mut(),
         );
+
+        let mut headers = vec![("X-Anka-Transport".to_string(), "HTTPS/TLS".to_string())];
+        let mut cookie_idx: DWORD = 0;
+        loop {
+            let mut buf_w = [0u16; 1024];
+            let mut buf_bytes: DWORD = (buf_w.len() * 2) as DWORD;
+            let ok = WinHttpQueryHeaders(
+                h_request,
+                WINHTTP_QUERY_SET_COOKIE,
+                null(),
+                buf_w.as_mut_ptr().cast::<c_void>(),
+                &mut buf_bytes,
+                &mut cookie_idx,
+            );
+            if ok == 0 {
+                break;
+            }
+            let wide_len = (buf_bytes as usize) / 2;
+            let val = String::from_utf16_lossy(&buf_w[..wide_len.min(buf_w.len())])
+                .trim_end_matches('\0')
+                .trim()
+                .to_string();
+            if !val.is_empty() {
+                headers.push(("Set-Cookie".to_string(), val));
+            }
+        }
 
         // Yanıt gövdesini (HTML baytlarını) parça parça oku
         let mut body_bytes = Vec::new();
@@ -173,7 +238,7 @@ pub fn fetch_https(url: &Url) -> Result<HttpResponse, NetError> {
         let body = String::from_utf8_lossy(&body_bytes).into_owned();
         Ok(HttpResponse {
             status_code: status_code_u32 as u16,
-            headers: vec![("X-Anka-Transport".to_string(), "HTTPS/TLS".to_string())],
+            headers,
             body,
             raw_body: body_bytes,
         })
