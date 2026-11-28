@@ -111,6 +111,39 @@ impl DomNode {
         }
         None
     }
+
+    /// Basit CSS seçiciyle (`#id`, `.class`, `tag`, `tag.class`) eşleşen ilk düğümü bulur (`document.querySelector`).
+    pub fn find_by_selector_mut(&mut self, selector: &str) -> Option<&mut DomNode> {
+        let sel = selector.trim();
+        if sel.is_empty() {
+            return None;
+        }
+        if let NodeType::Element(tag_name) = &self.node_type {
+            let matched = if let Some(target_id) = sel.strip_prefix('#') {
+                self.get_attribute("id").is_some_and(|v| v.trim() == target_id)
+            } else if let Some(target_cls) = sel.strip_prefix('.') {
+                self.get_attribute("class")
+                    .is_some_and(|c| c.split_whitespace().any(|w| w == target_cls))
+            } else if let Some((t, cls)) = sel.split_once('.') {
+                tag_name.eq_ignore_ascii_case(t)
+                    && self
+                        .get_attribute("class")
+                        .is_some_and(|c| c.split_whitespace().any(|w| w == cls))
+            } else {
+                tag_name.eq_ignore_ascii_case(sel)
+            };
+            if matched {
+                return Some(self);
+            }
+        }
+
+        for child in &mut self.children {
+            if let Some(found) = child.find_by_selector_mut(sel) {
+                return Some(found);
+            }
+        }
+        None
+    }
 }
 
 /// Etiketin içindeki özellikleri (örn: `a href="Status.html"` veya `div hidden class="x"`) ayrıştırır.
@@ -266,7 +299,7 @@ pub fn parse_html(raw: &str) -> DomNode {
                     // ÖZEL RAW TEXT KURALI (`<script>` ve `<style>`):
                     // JavaScript (`if (x < 5)`) veya CSS (`div > p`) içindeki `<` / `>` işaretleri
                     // HTML etiketi sanılmasın diye kapanış etiketine kadar tüm ham kodu tek parça al!
-                    if etiket_adi == "script" || etiket_adi == "style" {
+                    if etiket_adi == "script" || etiket_adi == "style" || etiket_adi == "textarea" {
                         let close_tag = format!("</{etiket_adi}>");
                         let mut raw_node = DomNode::element_with_attrs(&etiket_adi, ozellikler);
                         let lower_kalan = kalan.to_lowercase();

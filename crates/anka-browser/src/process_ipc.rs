@@ -28,6 +28,22 @@ pub struct RenderSnapshot {
 }
 
 impl RenderSnapshot {
+    pub fn empty() -> Self {
+        Self {
+            pid: 0,
+            crashed: false,
+            page_title: None,
+            page_bg: None,
+            status_message: String::new(),
+            display_list: Vec::new(),
+            status_code: 0,
+            body_len: 0,
+            shield_blocked: 0,
+            set_cookies: Vec::new(),
+            js_logs: Vec::new(),
+        }
+    }
+
     pub fn from_loaded_page(page: &LoadedPage, pid: u32) -> Self {
         Self {
             pid,
@@ -177,7 +193,7 @@ pub fn serialize_snapshot(snap: &RenderSnapshot) -> String {
             ("0".to_string(), String::new())
         };
         out.push_str(&format!(
-            "CMD\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "CMD\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             cmd.x,
             cmd.y,
             cmd.width,
@@ -200,7 +216,8 @@ pub fn serialize_snapshot(snap: &RenderSnapshot) -> String {
             u8::from(cmd.is_submit),
             u8::from(cmd.is_password),
             u8::from(cmd.is_post_form),
-            cmd.border_radius
+            cmd.border_radius,
+            u8::from(cmd.is_multiline)
         ));
     }
     for cookie in &snap.set_cookies {
@@ -251,7 +268,7 @@ pub fn deserialize_snapshot<R: BufRead>(reader: &mut R) -> Result<RenderSnapshot
             return Err("Alt surec veri aktarimi sirasinda sonlandi".to_string());
         }
         let p: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
-        if p.len() != 24 || p[0] != "CMD" {
+        if p.len() != 25 || p[0] != "CMD" {
             return Err("Bozuk IPC CMD satiri".to_string());
         }
 
@@ -296,6 +313,7 @@ pub fn deserialize_snapshot<R: BufRead>(reader: &mut R) -> Result<RenderSnapshot
             is_password: p[21] == "1",
             is_post_form: p[22] == "1",
             border_radius: p[23].parse().unwrap_or(0),
+            is_multiline: p[24] == "1",
         });
     }
 

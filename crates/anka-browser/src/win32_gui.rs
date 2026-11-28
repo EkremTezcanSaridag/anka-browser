@@ -822,7 +822,11 @@ unsafe extern "system" fn wnd_proc(
                 if ch_code == VK_BACK as u32 {
                     st.state.backspace_input();
                 } else if ch_code == VK_RETURN as u32 {
-                    submit_action = st.state.submit_focused_form();
+                    if st.state.focused_is_multiline() {
+                        st.state.type_char('\n');
+                    } else {
+                        submit_action = st.state.submit_focused_form();
+                    }
                 } else if let Some(ch) = char::from_u32(ch_code)
                     && !ch.is_control()
                 {
@@ -1123,24 +1127,55 @@ unsafe extern "system" fn wnd_proc(
 
                             if !gorsel_cizildi && !render_text.is_empty() {
                                 SetTextColor(hdc, rgb(text_color.r, text_color.g, text_color.b));
-                                let wide_render = to_wide(&render_text);
                                 let pad = komut.padding as i32;
                                 let box_w = (box_rect.right - box_rect.left).max(1);
-                                let approx_text_w = ((render_text.chars().count() as u32)
-                                    * (komut.font_size * 56 / 100))
-                                    as i32;
-                                let text_x = match komut.text_align.as_str() {
-                                    "center" => box_rect.left + ((box_w - approx_text_w) / 2).max(pad),
-                                    "right" => box_rect.left + (box_w - approx_text_w - pad).max(pad),
-                                    _ => draw_x + 4 + pad,
-                                };
-                                TextOutW(
-                                    hdc,
-                                    text_x,
-                                    draw_y + 2 + pad,
-                                    wide_render.as_ptr(),
-                                    (wide_render.len() - 1) as i32,
-                                );
+                                if komut.is_multiline {
+                                    let max_chars = ((box_w - pad * 2).max(40) as usize) / 8;
+                                    let line_step = (komut.font_size as i32 + 5).max(18);
+                                    let max_y = box_rect.bottom - (komut.font_size as i32);
+                                    for (idx, line) in
+                                        BrowserState::wrap_display_lines(&render_text, max_chars)
+                                            .iter()
+                                            .enumerate()
+                                    {
+                                        let line_y = draw_y + 2 + pad + (idx as i32) * line_step;
+                                        if line_y > max_y {
+                                            break;
+                                        }
+                                        if line.is_empty() {
+                                            continue;
+                                        }
+                                        let wide_line = to_wide(line);
+                                        TextOutW(
+                                            hdc,
+                                            draw_x + 4 + pad,
+                                            line_y,
+                                            wide_line.as_ptr(),
+                                            (wide_line.len() - 1) as i32,
+                                        );
+                                    }
+                                } else {
+                                    let wide_render = to_wide(&render_text);
+                                    let approx_text_w = ((render_text.chars().count() as u32)
+                                        * (komut.font_size * 56 / 100))
+                                        as i32;
+                                    let text_x = match komut.text_align.as_str() {
+                                        "center" => {
+                                            box_rect.left + ((box_w - approx_text_w) / 2).max(pad)
+                                        }
+                                        "right" => {
+                                            box_rect.left + (box_w - approx_text_w - pad).max(pad)
+                                        }
+                                        _ => draw_x + 4 + pad,
+                                    };
+                                    TextOutW(
+                                        hdc,
+                                        text_x,
+                                        draw_y + 2 + pad,
+                                        wide_render.as_ptr(),
+                                        (wide_render.len() - 1) as i32,
+                                    );
+                                }
                             }
                         }
 
@@ -1303,6 +1338,9 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) {
                         }
                     }
                     InvalidateRect(hwnd, null(), 1);
+                    continue;
+                } else if ctrl && msg.wParam == b'H' as usize {
+                    sayfayi_yukle_ve_yenile(hwnd, "http://anka.local/gecmis", true);
                     continue;
                 } else if ctrl && msg.wParam == b'U' as usize {
                     let cur = DURUM

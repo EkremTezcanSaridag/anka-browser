@@ -125,7 +125,7 @@ impl LoadedPage {
         };
 
         self.status_message = format!(
-            "{} {} | {} bayt | {} kutu | Telek Engine v0.3.2{}{}",
+            "{} {} | {} bayt | {} kutu | Telek Engine v0.3.3{}{}",
             protokol_etiketi,
             self.status_code,
             self.body_len,
@@ -400,7 +400,7 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-fn extract_form_field(body: &str, field_name: &str) -> String {
+pub(crate) fn extract_form_field(body: &str, field_name: &str) -> String {
     for pair in body.split('&') {
         if let Some((raw_k, raw_v)) = pair.split_once('=')
             && percent_decode(raw_k) == field_name
@@ -541,6 +541,53 @@ pub fn motoru_calistir_kalkanli(
     )
 }
 
+fn dahili_not_sayfasi(method: &str, post_body: Option<&str>) -> String {
+    let body_html = if method.eq_ignore_ascii_case("POST") {
+        let body = post_body.unwrap_or("");
+        let baslik = extract_form_field(body, "baslik");
+        let icerik = extract_form_field(body, "icerik");
+        let guvenli_baslik = if baslik.trim().is_empty() {
+            "Basliksiz Not".to_string()
+        } else {
+            html_escape(&baslik)
+        };
+        let mut satirlar = String::new();
+        for line in icerik.split('\n') {
+            satirlar.push_str(&format!("<p>{}</p>", html_escape(line)));
+        }
+        if satirlar.is_empty() {
+            satirlar = "<p>(Bos not)</p>".to_string();
+        }
+        format!(
+            "<div class=\"basari\"><h2>{guvenli_baslik}</h2>{satirlar}</div>\
+             <p><a class=\"pill\" href=\"http://anka.local/not\">Yeni Not Yaz</a> \
+             <a class=\"pill\" href=\"http://anka.local/hosgeldiniz\">Ana Sayfa</a></p>"
+        )
+    } else {
+        "<div class=\"bilgi\"><p>Bu sayfa cok satirli &lt;textarea&gt; form girisini test eder. Enter ile yeni satira gecebilir, Tab ile alanlar arasinda dolasabilirsiniz.</p></div>\
+         <form action=\"http://anka.local/not\" method=\"POST\">\
+         <p><input type=\"text\" name=\"baslik\" placeholder=\"Not basligi...\"></p>\
+         <textarea name=\"icerik\" rows=\"4\" placeholder=\"Cok satirli notunuzu yazin (Enter = yeni satir)...\"></textarea>\
+         <input type=\"submit\" value=\"Notu Gonder (POST)\">\
+         </form>\
+         <p><a class=\"pill\" href=\"http://anka.local/hosgeldiniz\">Ana Sayfa</a></p>"
+            .to_string()
+    };
+
+    format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
+         <html><head><title>Cok Satirli Not Defteri (&lt;textarea&gt;)</title><style>\
+         h1 {{ color: #1e3a8a; background-color: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 8px; text-align: center; }}\
+         .bilgi {{ color: #1e293b; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }}\
+         .basari {{ color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 12px; }}\
+         .pill {{ color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; border-radius: 6px; font-size: 15px; }}\
+         </style></head><body>\
+         <h1>Anka Not Defteri (&lt;textarea&gt; + POST)</h1>\
+         {body_html}\
+         </body></html>"
+    )
+}
+
 fn dahili_anka_local_http(
     url: &Url,
     method: &str,
@@ -568,6 +615,8 @@ fn dahili_anka_local_http(
         .to_string()
     } else if url.path == "/oturum" {
         dahili_oturum_sayfasi(method, post_body, cookie_header)
+    } else if url.path == "/not" {
+        dahili_not_sayfasi(method, post_body)
     } else if url.path == "/oturum-cikis" {
         concat!(
             "HTTP/1.1 200 OK\r\n",
@@ -602,12 +651,14 @@ fn dahili_anka_local_http(
             ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 10px; font-size: 15px; }",
             "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; border-radius: 8px; padding: 10px; font-size: 15px; }",
             "</style></head><body>",
-            "<h1>Anka Browser v0.3.2 — Kalici Cerezler, DevTools, Tab &amp; Yuvarlak Koseler!</h1>",
+            "<h1>Anka Browser v0.3.3 — Kalici Gecmis, Textarea, querySelector &amp; addEventListener!</h1>",
             "<nav>",
             "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
             "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
             "<a class=\"pill\" href=\"http://anka.local/oturum\">Oturum Testi (POST/Cookie)</a>",
+            "<a class=\"pill\" href=\"http://anka.local/not\">Not Formu (Textarea)</a>",
             "<a class=\"pill\" href=\"http://anka.local/yer-imleri\">Kalici Yer Imlerim</a>",
+            "<a class=\"pill\" href=\"http://anka.local/gecmis\">Gecmisim (Ctrl+H)</a>",
             "<a class=\"pill\" href=\"http://anka.local/gelistirici\">Gelistirici (DevTools)</a>",
             "<a class=\"pill\" href=\"http://anka.local/kalkan\">Kalkan Testi</a>",
             "<a class=\"pill\" href=\"http://anka.local/cokme-testi\">Cokme Testi</a>",
@@ -624,14 +675,14 @@ fn dahili_anka_local_http(
             "<div class=\"kart\">",
             "<p id=\"js_sayac\">Yukleniyor...</p>",
             "<button class=\"jsbtn\" onclick=\"artir()\">+1 Artir (JS)</button>",
-            "<button class=\"jsreset\" onclick=\"sifirla()\">Sifirla</button>",
+            "<button class=\"jsreset\">Sifirla</button>",
             "</div>",
-            "<div id=\"duyuru\"><p>Sol kutudaki yesil butona tikladiginizda sifirdan yazdigimiz anka-js motoru calisip DOM agacini aninda gunceller! Ctrl+U ile kaynak koda bakabilirsiniz.</p></div>",
+            "<div id=\"duyuru\"><p>Sol kutudaki yesil butona tikladiginizda sifirdan yazdigimiz anka-js motoru calisip DOM agacini aninda gunceller! Sifirla butonu querySelector + addEventListener ile baglidir.</p></div>",
             "</div>",
             "<script>",
             "let tiklama = 0;",
             "document.getElementById(\"js_sayac\").innerText = \"Anka JS Hazir! Tiklama Sayisi: 0\";",
-            "console.log(\"Anka JS v0.3.2 baslatildi!\");",
+            "console.log(\"Anka JS v0.3.3 baslatildi!\");",
             "function artir() {",
             "  tiklama++;",
             "  document.getElementById(\"js_sayac\").innerText = \"Tiklama Sayisi: \" + tiklama;",
@@ -646,6 +697,7 @@ fn dahili_anka_local_http(
             "  document.getElementById(\"js_sayac\").style.color = \"#065f46\";",
             "  console.log(\"Sayac sifirlandi\");",
             "}",
+            "document.querySelector(\".jsreset\").addEventListener(\"click\", sifirla);",
             "</script>",
             "</body></html>"
         )
@@ -841,7 +893,7 @@ fn main() {
     // Ekransız (Headless / `--headless` / CI) ortamda terminal önizlemesi çalışır
     let sayfa = motoru_calistir(&baslangic_adresi, 860);
     println!(
-        "Anka Browser v0.3.2 ({}) [{}] | page_bg={:?} -> {}",
+        "Anka Browser v0.3.3 ({}) [{}] | page_bg={:?} -> {}",
         baslangic_adresi,
         sayfa.page_title.as_deref().unwrap_or("Adsız"),
         sayfa.page_bg,

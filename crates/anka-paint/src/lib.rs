@@ -610,6 +610,7 @@ pub struct PaintCommand {
     pub is_submit: bool,
     pub is_password: bool,
     pub is_post_form: bool,
+    pub is_multiline: bool,
     pub border_radius: u32,
 }
 
@@ -641,6 +642,7 @@ pub fn build_display_list(boxes: &[LayoutBox]) -> Vec<PaintCommand> {
             is_submit: b.is_submit,
             is_password: b.is_password,
             is_post_form: b.is_post_form,
+            is_multiline: b.is_multiline,
             border_radius: b.border_radius,
         });
     }
@@ -675,6 +677,7 @@ mod tests {
             is_submit: false,
             is_password: false,
             is_post_form: false,
+            is_multiline: false,
             border_radius: 8,
         }];
 
