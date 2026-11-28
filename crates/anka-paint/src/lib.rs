@@ -610,6 +610,7 @@ pub struct PaintCommand {
     pub is_submit: bool,
     pub is_password: bool,
     pub is_post_form: bool,
+    pub border_radius: u32,
 }
 
 /// `anka-layout` modülünden gelen koordinatlı kutuları (`LayoutBox`),
@@ -640,6 +641,7 @@ pub fn build_display_list(boxes: &[LayoutBox]) -> Vec<PaintCommand> {
             is_submit: b.is_submit,
             is_password: b.is_password,
             is_post_form: b.is_post_form,
+            border_radius: b.border_radius,
         });
     }
 
@@ -673,6 +675,7 @@ mod tests {
             is_submit: false,
             is_password: false,
             is_post_form: false,
+            border_radius: 8,
         }];
 
         let cizim_listesi = build_display_list(&kutular);

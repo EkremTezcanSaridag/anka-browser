@@ -41,10 +41,16 @@ const GDK_KEY_PRESS_MASK: c_int = 1 << 10;
 const GDK_SCROLL_MASK: c_int = 1 << 21;
 const GDK_SMOOTH_SCROLL_MASK: c_int = 1 << 23;
 
-// GDK Özel Tuş Kodları (`gdkkeysyms.h`):
+// GDK Modifiye Maskeleri ve Özel Tuş Kodları (`gdkkeysyms.h`):
+const GDK_SHIFT_MASK: u32 = 1 << 0;
+const GDK_CONTROL_MASK: u32 = 1 << 2;
 const GDK_KEY_BACKSPACE: u32 = 0xff08;
+const GDK_KEY_TAB: u32 = 0xff09;
 const GDK_KEY_RETURN: u32 = 0xff0d;
+const GDK_KEY_ESCAPE: u32 = 0xff1b;
 const GDK_KEY_KP_ENTER: u32 = 0xff8d;
+const GDK_KEY_F5: u32 = 0xffc2;
+const GDK_KEY_ISO_LEFT_TAB: u32 = 0xfe20;
 
 // GDK Kaydırma Yönleri:
 const GDK_SCROLL_UP: c_int = 0;
@@ -117,6 +123,7 @@ struct GtkCairoApi {
     gdk_event_get_scroll_deltas:
         unsafe extern "C" fn(*const GdkEvent, *mut c_double, *mut c_double) -> c_int,
     gdk_event_get_keyval: unsafe extern "C" fn(*const GdkEvent, *mut u32) -> c_int,
+    gdk_event_get_state: unsafe extern "C" fn(*const GdkEvent, *mut u32) -> c_int,
     gdk_keyval_to_unicode: unsafe extern "C" fn(u32) -> u32,
 
     g_signal_connect_data: unsafe extern "C" fn(
@@ -130,6 +137,9 @@ struct GtkCairoApi {
 
     cairo_set_source_rgb: unsafe extern "C" fn(*mut CairoT, c_double, c_double, c_double),
     cairo_rectangle: unsafe extern "C" fn(*mut CairoT, c_double, c_double, c_double, c_double),
+    cairo_new_sub_path: unsafe extern "C" fn(*mut CairoT),
+    cairo_arc: unsafe extern "C" fn(*mut CairoT, c_double, c_double, c_double, c_double, c_double),
+    cairo_close_path: unsafe extern "C" fn(*mut CairoT),
     cairo_fill: unsafe extern "C" fn(*mut CairoT),
     cairo_stroke: unsafe extern "C" fn(*mut CairoT),
     cairo_set_line_width: unsafe extern "C" fn(*mut CairoT, c_double),
@@ -252,12 +262,16 @@ fn gtk_api() -> Option<&'static GtkCairoApi> {
                 gdk_event_get_scroll_direction: load_sym(gdk, c"gdk_event_get_scroll_direction")?,
                 gdk_event_get_scroll_deltas: load_sym(gdk, c"gdk_event_get_scroll_deltas")?,
                 gdk_event_get_keyval: load_sym(gdk, c"gdk_event_get_keyval")?,
+                gdk_event_get_state: load_sym(gdk, c"gdk_event_get_state")?,
                 gdk_keyval_to_unicode: load_sym(gdk, c"gdk_keyval_to_unicode")?,
 
                 g_signal_connect_data: load_sym(gobj, c"g_signal_connect_data")?,
 
                 cairo_set_source_rgb: load_sym(cairo, c"cairo_set_source_rgb")?,
                 cairo_rectangle: load_sym(cairo, c"cairo_rectangle")?,
+                cairo_new_sub_path: load_sym(cairo, c"cairo_new_sub_path")?,
+                cairo_arc: load_sym(cairo, c"cairo_arc")?,
+                cairo_close_path: load_sym(cairo, c"cairo_close_path")?,
                 cairo_fill: load_sym(cairo, c"cairo_fill")?,
                 cairo_stroke: load_sym(cairo, c"cairo_stroke")?,
                 cairo_set_line_width: load_sym(cairo, c"cairo_set_line_width")?,
@@ -563,7 +577,7 @@ unsafe extern "C" fn on_canvas_button_press(
 }
 
 /// Tuval üzerindeki odaklı bir HTML `<input>` kutusuna klavyeden harf yazıldığında,
-/// `Backspace` ile silindiğinde veya `Enter` ile form gönderildiğinde çalışır!
+/// `Tab`/`Shift+Tab` ile alan değiştiğinde, `Escape` ile çıkıldığında veya `Enter` basıldığında çalışır!
 unsafe extern "C" fn on_canvas_key_press(
     widget: *mut GtkWidget,
     event: *const GdkEvent,
@@ -574,6 +588,12 @@ unsafe extern "C" fn on_canvas_key_press(
     if unsafe { (api.gdk_event_get_keyval)(event, &mut keyval) } == 0 {
         return 0;
     }
+    let mut mod_state: u32 = 0;
+    let _ = unsafe { (api.gdk_event_get_state)(event, &mut mod_state) };
+    if (mod_state & GDK_CONTROL_MASK) != 0 || keyval == GDK_KEY_F5 {
+        // Pencere seviyesi kısayolların üst pencereye kabarcıklanmasına izin ver!
+        return 0;
+    }
 
     let mut submit_action = ClickAction::None;
     let mut handled = false;
@@ -582,7 +602,12 @@ unsafe extern "C" fn on_canvas_key_press(
         && let Some(app) = guard.as_mut()
         && app.state.focused_input().is_some()
     {
-        if keyval == GDK_KEY_BACKSPACE {
+        if keyval == GDK_KEY_TAB || keyval == GDK_KEY_ISO_LEFT_TAB {
+            let reverse = keyval == GDK_KEY_ISO_LEFT_TAB || (mod_state & GDK_SHIFT_MASK) != 0;
+            handled = app.state.focus_next_input(reverse);
+        } else if keyval == GDK_KEY_ESCAPE {
+            handled = app.state.blur_input();
+        } else if keyval == GDK_KEY_BACKSPACE {
             handled = app.state.backspace_input();
         } else if keyval == GDK_KEY_RETURN || keyval == GDK_KEY_KP_ENTER {
             submit_action = app.state.submit_focused_form();
@@ -605,6 +630,108 @@ unsafe extern "C" fn on_canvas_key_press(
     sayfa_eylemi_uygula(submit_action);
 
     if handled { 1 } else { 0 }
+}
+
+/// Pencere geneli tarayıcı kısayolları (`Ctrl+T`, `Ctrl+W`, `Ctrl+L`, `Ctrl+R`, `F5`, `Ctrl+U`):
+unsafe extern "C" fn on_window_key_press(
+    _widget: *mut GtkWidget,
+    event: *const GdkEvent,
+    _data: *mut c_void,
+) -> c_int {
+    let Some(api) = gtk_api() else { return 0 };
+    let mut keyval: u32 = 0;
+    if unsafe { (api.gdk_event_get_keyval)(event, &mut keyval) } == 0 {
+        return 0;
+    }
+    let mut mod_state: u32 = 0;
+    let _ = unsafe { (api.gdk_event_get_state)(event, &mut mod_state) };
+    let ctrl = (mod_state & GDK_CONTROL_MASK) != 0;
+
+    if keyval == GDK_KEY_F5 || (ctrl && matches!(keyval, 0x0072 | 0x0052)) {
+        if let Ok(mut guard) = LINUX_APP.lock()
+            && let Some(app) = guard.as_mut()
+        {
+            app.state.reload();
+            arayuzu_guncelle(api, app);
+        }
+        return 1;
+    }
+
+    if ctrl && matches!(keyval, 0x0074 | 0x0054) {
+        if let Ok(mut guard) = LINUX_APP.lock()
+            && let Some(app) = guard.as_mut()
+            && app.state.tabs.len() < MAX_TAB_SLOTS
+        {
+            app.state.new_tab("http://anka.local/hosgeldiniz");
+            arayuzu_guncelle(api, app);
+        }
+        return 1;
+    }
+
+    if ctrl && matches!(keyval, 0x0077 | 0x0057) {
+        if let Ok(mut guard) = LINUX_APP.lock()
+            && let Some(app) = guard.as_mut()
+        {
+            app.state.close_active_tab();
+            arayuzu_guncelle(api, app);
+        }
+        return 1;
+    }
+
+    if ctrl && matches!(keyval, 0x006c | 0x004c) {
+        if let Ok(mut guard) = LINUX_APP.lock()
+            && let Some(app) = guard.as_mut()
+        {
+            app.state.blur_input();
+            unsafe {
+                (api.gtk_widget_grab_focus)(app.url_entry as *mut GtkWidget);
+                (api.gtk_widget_queue_draw)(app.canvas as *mut GtkWidget);
+            }
+        }
+        return 1;
+    }
+
+    if ctrl && matches!(keyval, 0x0075 | 0x0055) {
+        let cur = LINUX_APP
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|a| a.state.current_url().to_string()))
+            .unwrap_or_default();
+        if !cur.is_empty() && !cur.starts_with("view-source:") {
+            adres_yukle(&format!("view-source:{cur}"), true);
+        }
+        return 1;
+    }
+
+    0
+}
+
+unsafe fn cairo_draw_box_path(
+    api: &GtkCairoApi,
+    cr: *mut CairoT,
+    x: c_double,
+    y: c_double,
+    w: c_double,
+    h: c_double,
+    radius_px: u32,
+) {
+    let r = (radius_px as c_double).min(w / 2.0).min(h / 2.0);
+    if r <= 0.5 {
+        unsafe {
+            (api.cairo_rectangle)(cr, x, y, w, h);
+        }
+        return;
+    }
+    let half_pi = std::f64::consts::FRAC_PI_2;
+    let pi = std::f64::consts::PI;
+    unsafe {
+        (api.cairo_new_sub_path)(cr);
+        (api.cairo_arc)(cr, x + w - r, y + r, r, -half_pi, 0.0);
+        (api.cairo_arc)(cr, x + w - r, y + h - r, r, 0.0, half_pi);
+        (api.cairo_arc)(cr, x + r, y + h - r, r, half_pi, pi);
+        (api.cairo_arc)(cr, x + r, y + r, r, pi, 3.0 * half_pi);
+        (api.cairo_close_path)(cr);
+    }
 }
 
 unsafe extern "C" fn on_canvas_scroll(
@@ -693,7 +820,15 @@ unsafe extern "C" fn on_canvas_draw(
                         bg.g as c_double / 255.0,
                         bg.b as c_double / 255.0,
                     );
-                    (api.cairo_rectangle)(cr, draw_x - 4.0, draw_y - 2.0, box_w, box_h);
+                    cairo_draw_box_path(
+                        api,
+                        cr,
+                        draw_x - 4.0,
+                        draw_y - 2.0,
+                        box_w,
+                        box_h,
+                        komut.border_radius,
+                    );
                     (api.cairo_fill)(cr);
                 }
 
@@ -745,7 +880,15 @@ unsafe extern "C" fn on_canvas_draw(
                 if is_focused_input {
                     (api.cairo_set_source_rgb)(cr, 37.0 / 255.0, 99.0 / 255.0, 235.0 / 255.0);
                     (api.cairo_set_line_width)(cr, 2.0);
-                    (api.cairo_rectangle)(cr, draw_x - 4.0, draw_y - 2.0, box_w, box_h);
+                    cairo_draw_box_path(
+                        api,
+                        cr,
+                        draw_x - 4.0,
+                        draw_y - 2.0,
+                        box_w,
+                        box_h,
+                        komut.border_radius,
+                    );
                     (api.cairo_stroke)(cr);
                 } else if let Some(border) = &komut.border_color {
                     (api.cairo_set_source_rgb)(
@@ -755,7 +898,15 @@ unsafe extern "C" fn on_canvas_draw(
                         border.b as c_double / 255.0,
                     );
                     (api.cairo_set_line_width)(cr, 1.0);
-                    (api.cairo_rectangle)(cr, draw_x - 4.0, draw_y - 2.0, box_w, box_h);
+                    cairo_draw_box_path(
+                        api,
+                        cr,
+                        draw_x - 4.0,
+                        draw_y - 2.0,
+                        box_w,
+                        box_h,
+                        komut.border_radius,
+                    );
                     (api.cairo_stroke)(cr);
                 }
 
@@ -937,7 +1088,14 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) -> bool {
         let title_c = to_cstr(&state.window_title());
         (api.gtk_window_set_title)(window as *mut GtkWindow, title_c.as_ptr());
         (api.gtk_window_set_default_size)(window as *mut GtkWindow, 1020, 720);
+        (api.gtk_widget_add_events)(window, GDK_KEY_PRESS_MASK);
         connect_signal(api, window, "destroy", on_window_destroy as GCallback);
+        connect_signal(
+            api,
+            window,
+            "key-press-event",
+            on_window_key_press as GCallback,
+        );
 
         let vbox = (api.gtk_box_new)(GTK_ORIENTATION_VERTICAL, 0);
         (api.gtk_container_add)(window as *mut GtkContainer, vbox);

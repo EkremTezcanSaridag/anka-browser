@@ -125,7 +125,7 @@ impl LoadedPage {
         };
 
         self.status_message = format!(
-            "{} {} | {} bayt | {} kutu | Telek Engine v0.3.1{}{}",
+            "{} {} | {} bayt | {} kutu | Telek Engine v0.3.2{}{}",
             protokol_etiketi,
             self.status_code,
             self.body_len,
@@ -151,7 +151,14 @@ impl LoadedPage {
 /// - Protokol yazılmayan web adreslerinin başına otomatik `https://` ekler.
 pub fn normalize_address(raw: &str) -> String {
     let trimmed = raw.trim();
-    if trimmed.is_empty() || trimmed.contains("://") {
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if trimmed.len() >= 12 && trimmed[..12].eq_ignore_ascii_case("view-source:") {
+        let inner = normalize_address(&trimmed[12..]);
+        return format!("view-source:{inner}");
+    }
+    if trimmed.contains("://") {
         return trimmed.to_string();
     }
     if trimmed.starts_with('/') {
@@ -276,7 +283,7 @@ fn yaniti_canli_sayfaya_donustur(
         p  { color: black; font-size: 16px; }
         li { color: black; font-size: 16px; }
         a  { color: blue; font-size: 16px; }
-        button { color: #0f172a; background-color: #e2e8f0; border: 1px solid #94a3b8; font-size: 15px; }
+        button { color: #0f172a; background-color: #e2e8f0; border: 1px solid #94a3b8; border-radius: 6px; font-size: 15px; }
     ";
     let mut css_kurallari = parse_css(varsayilan_css);
 
@@ -418,7 +425,7 @@ fn cookie_value(cookie_header: Option<&str>, name: &str) -> Option<String> {
     None
 }
 
-fn html_escape(input: &str) -> String {
+pub(crate) fn html_escape(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
         match ch {
@@ -459,7 +466,7 @@ fn dahili_oturum_sayfasi(
             cookie_value(cookie_header, "anka_user")
         } else {
             extra_headers = format!(
-                "Set-Cookie: anka_user={ham_kullanici}; Path=/\r\nSet-Cookie: anka_role=uye; Path=/\r\n"
+                "Set-Cookie: anka_user={ham_kullanici}; Path=/; Max-Age=604800\r\nSet-Cookie: anka_role=uye; Path=/; Max-Age=604800\r\n"
             );
             Some(ham_kullanici)
         }
@@ -506,12 +513,12 @@ fn dahili_oturum_sayfasi(
     format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n{extra_headers}\r\n\
          <html><head><title>Anka Oturum Testi (POST &amp; Cookie)</title><style>\
-         h1 {{ color: #1e3a8a; background-color: #eff6ff; border: 1px solid #bfdbfe; padding: 8px; text-align: center; }}\
-         .bilgi {{ color: #1e293b; background-color: #f8fafc; border: 1px solid #cbd5e1; padding: 10px; }}\
-         .basari {{ color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; padding: 12px; }}\
-         .uyari {{ color: #991b1b; background-color: #fef2f2; border: 1px solid #ef4444; padding: 10px; }}\
-         .pill {{ color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; font-size: 15px; }}\
-         .cikis {{ color: #ffffff; background-color: #dc2626; border: 1px solid #b91c1c; font-size: 15px; }}\
+         h1 {{ color: #1e3a8a; background-color: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 8px; text-align: center; }}\
+         .bilgi {{ color: #1e293b; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }}\
+         .basari {{ color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 12px; }}\
+         .uyari {{ color: #991b1b; background-color: #fef2f2; border: 1px solid #ef4444; border-radius: 8px; padding: 10px; }}\
+         .pill {{ color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; border-radius: 6px; font-size: 15px; }}\
+         .cikis {{ color: #ffffff; background-color: #dc2626; border: 1px solid #b91c1c; border-radius: 6px; font-size: 15px; }}\
          </style></head><body>\
          <h1>Anka Oturum &amp; HTTP POST Form Testi</h1>\
          {icerik}\
@@ -534,6 +541,199 @@ pub fn motoru_calistir_kalkanli(
     )
 }
 
+fn dahili_anka_local_http(
+    url: &Url,
+    method: &str,
+    post_body: Option<&str>,
+    cookie_header: Option<&str>,
+) -> String {
+    if url.path == "/kalkan" {
+        concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: text/html\r\n\r\n",
+            "<html><head><title>Anka Kalkan Testi</title><style>",
+            "h1 { color: #0f766e; background-color: #f0fdfa; border: 1px solid #99f6e4; border-radius: 8px; padding: 8px; text-align: center; }",
+            ".advertisement { color: #991b1b; background-color: #fee2e2; border: 1px solid #ef4444; border-radius: 8px; padding: 10px; }",
+            ".bilgi { color: #1e293b; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }",
+            "</style></head><body>",
+            "<h1>Anka Kalkan (Reklam &amp; Izleyici Engelleyici) Test Sayfasi</h1>",
+            "<div class=\"bilgi\"><p>Asagida gizli 1x1 izleme pikseli, izleyici script ve bir reklam kutusu vardir. Ust cubuktaki Kalkan dugmesine basarak farki aninda gorebilirsiniz!</p>",
+            "<p><a href=\"https://example.com/?utm_source=anka&amp;fbclid=izleyici123\">Izleyicisiz Temiz Link Ornegi</a></p></div>",
+            "<div class=\"advertisement\"><p>REKLAM ALANI: Kalkan Acikken Bu Kutu Gizlenir!</p></div>",
+            "<img src=\"https://google-analytics.com/collect.gif\" alt=\"Gizli Izleyici\" width=\"1\" height=\"1\">",
+            "<script src=\"https://doubleclick.net/ads/tracker.js\"></script>",
+            "<p><a href=\"http://anka.local/hosgeldiniz\">Ana Sayfaya Don</a></p>",
+            "</body></html>"
+        )
+        .to_string()
+    } else if url.path == "/oturum" {
+        dahili_oturum_sayfasi(method, post_body, cookie_header)
+    } else if url.path == "/oturum-cikis" {
+        concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: text/html\r\n",
+            "Set-Cookie: anka_user=; Path=/; Max-Age=0\r\n",
+            "Set-Cookie: anka_role=; Path=/; Max-Age=0\r\n\r\n",
+            "<html><head><title>Oturum Kapatildi</title><style>",
+            "h1 { color: #991b1b; background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 8px; text-align: center; }",
+            ".bilgi { color: #1e293b; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }",
+            ".pill { color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; border-radius: 6px; font-size: 15px; }",
+            "</style></head><body>",
+            "<h1>Oturum Kapatildi!</h1>",
+            "<div class=\"bilgi\"><p>Max-Age=0 talimati ile anka_user cerezi tarayici kavanozundan temizlendi.</p></div>",
+            "<p><a class=\"pill\" href=\"http://anka.local/oturum\">Tekrar Giris Yap</a> ",
+            "<a class=\"pill\" href=\"http://anka.local/hosgeldiniz\">Ana Sayfaya Don</a></p>",
+            "</body></html>"
+        )
+        .to_string()
+    } else {
+        concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: text/html\r\n\r\n",
+            "<html><head><title>Ana Sayfa</title><style>",
+            "h1 { color: #dc2626; background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; font-size: 30px; padding: 6px; text-align: center; }",
+            "h2 { color: #1d4ed8; font-size: 20px; }",
+            "p  { color: #334155; font-size: 16px; }",
+            "li { color: #0f766e; font-size: 16px; }",
+            ".pill { color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; border-radius: 6px; font-size: 15px; }",
+            ".jsbtn { color: #ffffff; background-color: #16a34a; border: 1px solid #15803d; border-radius: 6px; font-size: 15px; }",
+            ".jsreset { color: #ffffff; background-color: #dc2626; border: 1px solid #b91c1c; border-radius: 6px; font-size: 15px; }",
+            ".satir { display: flex; gap: 14px; }",
+            ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 10px; font-size: 15px; }",
+            "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; border-radius: 8px; padding: 10px; font-size: 15px; }",
+            "</style></head><body>",
+            "<h1>Anka Browser v0.3.2 — Kalici Cerezler, DevTools, Tab &amp; Yuvarlak Koseler!</h1>",
+            "<nav>",
+            "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
+            "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
+            "<a class=\"pill\" href=\"http://anka.local/oturum\">Oturum Testi (POST/Cookie)</a>",
+            "<a class=\"pill\" href=\"http://anka.local/yer-imleri\">Kalici Yer Imlerim</a>",
+            "<a class=\"pill\" href=\"http://anka.local/gelistirici\">Gelistirici (DevTools)</a>",
+            "<a class=\"pill\" href=\"http://anka.local/kalkan\">Kalkan Testi</a>",
+            "<a class=\"pill\" href=\"http://anka.local/cokme-testi\">Cokme Testi</a>",
+            "<a class=\"pill\" href=\"https://tr.wikipedia.org\">Vikipedi TR</a>",
+            "</nav>",
+            "<hr>",
+            "<form action=\"https://tr.wikipedia.org/w/index.php\">",
+            "<input type=\"text\" name=\"search\" placeholder=\"Vikipedi TR'de aramak icin tiklayip yazin...\">",
+            "<input type=\"submit\" value=\"Vikipedi Ara\">",
+            "</form>",
+            "<img src=\"http://anka.local/anka-logo.bmp\" alt=\"Anka Telek Engine Piksel Amblemi\" width=\"380\" height=\"110\">",
+            "<h2>7. Istasyon (Anka JS), Anka Kalkan, Kalici Cookie Jar ve DevTools!</h2>",
+            "<div class=\"satir\">",
+            "<div class=\"kart\">",
+            "<p id=\"js_sayac\">Yukleniyor...</p>",
+            "<button class=\"jsbtn\" onclick=\"artir()\">+1 Artir (JS)</button>",
+            "<button class=\"jsreset\" onclick=\"sifirla()\">Sifirla</button>",
+            "</div>",
+            "<div id=\"duyuru\"><p>Sol kutudaki yesil butona tikladiginizda sifirdan yazdigimiz anka-js motoru calisip DOM agacini aninda gunceller! Ctrl+U ile kaynak koda bakabilirsiniz.</p></div>",
+            "</div>",
+            "<script>",
+            "let tiklama = 0;",
+            "document.getElementById(\"js_sayac\").innerText = \"Anka JS Hazir! Tiklama Sayisi: 0\";",
+            "console.log(\"Anka JS v0.3.2 baslatildi!\");",
+            "function artir() {",
+            "  tiklama++;",
+            "  document.getElementById(\"js_sayac\").innerText = \"Tiklama Sayisi: \" + tiklama;",
+            "  console.log(\"Butona tiklandi -> \" + tiklama);",
+            "  if (tiklama >= 5) {",
+            "    document.getElementById(\"js_sayac\").style.color = \"#dc2626\";",
+            "  }",
+            "}",
+            "function sifirla() {",
+            "  tiklama = 0;",
+            "  document.getElementById(\"js_sayac\").innerText = \"Sayac Sifirlandi: 0\";",
+            "  document.getElementById(\"js_sayac\").style.color = \"#065f46\";",
+            "  console.log(\"Sayac sifirlandi\");",
+            "}",
+            "</script>",
+            "</body></html>"
+        )
+        .to_string()
+    }
+}
+
+fn view_source_sayfasi(
+    inner_raw: &str,
+    cookie_header: Option<&str>,
+    viewport_width: u32,
+    shield_enabled: bool,
+) -> LoadedPage {
+    let mut inner_url_str = normalize_address(inner_raw);
+    if shield_enabled {
+        let (cleaned, _) = shield::strip_tracking_params(&inner_url_str);
+        inner_url_str = cleaned;
+    }
+    let Ok(inner_url) = Url::parse(&inner_url_str) else {
+        return LoadedPage::error(format!("Hata [view-source] Gecersiz adres: {inner_url_str}"));
+    };
+
+    let yanit = if inner_url.host == "anka.local" {
+        let raw_http = dahili_anka_local_http(&inner_url, "GET", None, cookie_header);
+        match parse_http_response(&raw_http) {
+            Ok(r) => r,
+            Err(e) => return LoadedPage::error(format!("Hata [view-source]: {e:?}")),
+        }
+    } else {
+        match fetch_request(&inner_url, "GET", None, None, cookie_header, shield_enabled) {
+            Ok(r) => r,
+            Err(e) => return LoadedPage::error(format!("Hata [view-source] Baglanti hatasi: {e:?}")),
+        }
+    };
+
+    let safe_url = html_escape(&inner_url_str);
+    let mut headers_html = String::new();
+    for (k, v) in yanit.headers.iter().take(12) {
+        headers_html.push_str(&format!(
+            "<li>{}: {}</li>",
+            html_escape(k),
+            html_escape(v)
+        ));
+    }
+
+    let mut lines_html = String::new();
+    for (idx, line) in yanit.body.lines().take(180).enumerate() {
+        let line_no = idx + 1;
+        lines_html.push_str(&format!(
+            "<p>{line_no:03} | {}</p>",
+            html_escape(line)
+        ));
+    }
+    if lines_html.is_empty() {
+        lines_html = "<p>(Bos govde)</p>".to_string();
+    }
+
+    let source_http = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
+         <html><head><title>Kaynak: {safe_url}</title><style>\
+         h1 {{ color: #1e293b; background-color: #f1f5f9; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px; }}\
+         .pill {{ color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; border-radius: 6px; font-size: 14px; }}\
+         .kod {{ color: #e2e8f0; background-color: #0f172a; border: 1px solid #334155; border-radius: 8px; padding: 10px; font-size: 13px; }}\
+         .baslik {{ color: #0f172a; background-color: #f8fafc; border: 1px solid #cbd5e1; border-radius: 8px; padding: 8px; font-size: 14px; }}\
+         </style></head><body>\
+         <h1>Sayfa Kaynagi (view-source)</h1>\
+         <nav>\
+         <a class=\"pill\" href=\"{safe_url}\">Sayfaya Don</a>\
+         <a class=\"pill\" href=\"http://anka.local/gelistirici\">Gelistirici (DevTools)</a>\
+         <a class=\"pill\" href=\"http://anka.local/hosgeldiniz\">Ana Sayfa</a>\
+         </nav>\
+         <div class=\"baslik\"><p>Adres: {safe_url} | HTTP {status} | {len} bayt</p><ul>{headers_html}</ul></div>\
+         <div class=\"kod\">{lines_html}</div>\
+         </body></html>",
+        status = yanit.status_code,
+        len = yanit.body.len()
+    );
+
+    let view_url = Url::parse("http://anka.local/view-source").unwrap_or(inner_url);
+    yaniti_canli_sayfaya_donustur(
+        &view_url,
+        &parse_http_response(&source_http).unwrap(),
+        viewport_width,
+        false,
+        ShieldStats::default(),
+    )
+}
+
 pub fn motoru_calistir_istekli(
     hedef_adres: &str,
     method: &str,
@@ -543,6 +743,9 @@ pub fn motoru_calistir_istekli(
     shield_enabled: bool,
 ) -> LoadedPage {
     let mut hedef = normalize_address(hedef_adres);
+    if let Some(inner_raw) = hedef.strip_prefix("view-source:") {
+        return view_source_sayfasi(inner_raw, cookie_header, viewport_width, shield_enabled);
+    }
     let mut initial_stats = ShieldStats::default();
     if shield_enabled {
         let (clean_url, removed) = shield::strip_tracking_params(&hedef);
@@ -560,109 +763,8 @@ pub fn motoru_calistir_istekli(
 
     // İSTASYON 2: anka-net (İnternetten, Yerel Diskten veya Dahili Sayfadan HTML İndirme)
     let yanit = if url.host == "anka.local" {
-        let oturum_sayfasi_str: String;
-        let dahili_http = if url.path == "/kalkan" {
-            concat!(
-                "HTTP/1.1 200 OK\r\n",
-                "Content-Type: text/html\r\n\r\n",
-                "<html><head><title>Anka Kalkan Testi</title><style>",
-                "h1 { color: #0f766e; background-color: #f0fdfa; border: 1px solid #99f6e4; padding: 8px; text-align: center; }",
-                ".advertisement { color: #991b1b; background-color: #fee2e2; border: 1px solid #ef4444; padding: 10px; }",
-                ".bilgi { color: #1e293b; background-color: #f8fafc; border: 1px solid #cbd5e1; padding: 10px; }",
-                "</style></head><body>",
-                "<h1>Anka Kalkan (Reklam &amp; Izleyici Engelleyici) Test Sayfasi</h1>",
-                "<div class=\"bilgi\"><p>Asagida gizli 1x1 izleme pikseli, izleyici script ve bir reklam kutusu vardir. Ust cubuktaki Kalkan dugmesine basarak farki aninda gorebilirsiniz!</p>",
-                "<p><a href=\"https://example.com/?utm_source=anka&amp;fbclid=izleyici123\">Izleyicisiz Temiz Link Ornegi</a></p></div>",
-                "<div class=\"advertisement\"><p>REKLAM ALANI: Kalkan Acikken Bu Kutu Gizlenir!</p></div>",
-                "<img src=\"https://google-analytics.com/collect.gif\" alt=\"Gizli Izleyici\" width=\"1\" height=\"1\">",
-                "<script src=\"https://doubleclick.net/ads/tracker.js\"></script>",
-                "<p><a href=\"http://anka.local/hosgeldiniz\">Ana Sayfaya Don</a></p>",
-                "</body></html>"
-            )
-        } else if url.path == "/oturum" {
-            oturum_sayfasi_str = dahili_oturum_sayfasi(method, post_body, cookie_header);
-            oturum_sayfasi_str.as_str()
-        } else if url.path == "/oturum-cikis" {
-            concat!(
-                "HTTP/1.1 200 OK\r\n",
-                "Content-Type: text/html\r\n",
-                "Set-Cookie: anka_user=; Path=/; Max-Age=0\r\n",
-                "Set-Cookie: anka_role=; Path=/; Max-Age=0\r\n\r\n",
-                "<html><head><title>Oturum Kapatildi</title><style>",
-                "h1 { color: #991b1b; background-color: #fef2f2; border: 1px solid #fecaca; padding: 8px; text-align: center; }",
-                ".bilgi { color: #1e293b; background-color: #f8fafc; border: 1px solid #cbd5e1; padding: 10px; }",
-                ".pill { color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; font-size: 15px; }",
-                "</style></head><body>",
-                "<h1>Oturum Kapatildi!</h1>",
-                "<div class=\"bilgi\"><p>Max-Age=0 talimati ile anka_user cerezi tarayici kavanozundan temizlendi.</p></div>",
-                "<p><a class=\"pill\" href=\"http://anka.local/oturum\">Tekrar Giris Yap</a> ",
-                "<a class=\"pill\" href=\"http://anka.local/hosgeldiniz\">Ana Sayfaya Don</a></p>",
-                "</body></html>"
-            )
-        } else {
-            concat!(
-                "HTTP/1.1 200 OK\r\n",
-                "Content-Type: text/html\r\n\r\n",
-                "<html><head><title>Ana Sayfa</title><style>",
-                "h1 { color: #dc2626; background-color: #fef2f2; border: 1px solid #fecaca; font-size: 30px; padding: 6px; text-align: center; }",
-                "h2 { color: #1d4ed8; font-size: 20px; }",
-                "p  { color: #334155; font-size: 16px; }",
-                "li { color: #0f766e; font-size: 16px; }",
-                ".pill { color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; font-size: 15px; }",
-                ".jsbtn { color: #ffffff; background-color: #16a34a; border: 1px solid #15803d; font-size: 15px; }",
-                ".jsreset { color: #ffffff; background-color: #dc2626; border: 1px solid #b91c1c; font-size: 15px; }",
-                ".satir { display: flex; gap: 14px; }",
-                ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; padding: 10px; font-size: 15px; }",
-                "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; padding: 10px; font-size: 15px; }",
-                "</style></head><body>",
-                "<h1>Anka Browser v0.3.1 — Cerezler, HTTP POST &amp; Parola Kutulari!</h1>",
-                "<nav>",
-                "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
-                "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
-                "<a class=\"pill\" href=\"http://anka.local/oturum\">Oturum Testi (POST/Cookie)</a>",
-                "<a class=\"pill\" href=\"http://anka.local/yer-imleri\">Kalici Yer Imlerim</a>",
-                "<a class=\"pill\" href=\"http://anka.local/kalkan\">Kalkan Testi</a>",
-                "<a class=\"pill\" href=\"http://anka.local/cokme-testi\">Cokme Testi</a>",
-                "<a class=\"pill\" href=\"https://tr.wikipedia.org\">Vikipedi TR</a>",
-                "</nav>",
-                "<hr>",
-                "<form action=\"https://tr.wikipedia.org/w/index.php\">",
-                "<input type=\"text\" name=\"search\" placeholder=\"Vikipedi TR'de aramak icin tiklayip yazin...\">",
-                "<input type=\"submit\" value=\"Vikipedi Ara\">",
-                "</form>",
-                "<img src=\"http://anka.local/anka-logo.bmp\" alt=\"Anka Telek Engine Piksel Amblemi\" width=\"380\" height=\"110\">",
-                "<h2>7. Istasyon (Anka JS), Anka Kalkan, Cookie Jar ve Canli Formlar!</h2>",
-                "<div class=\"satir\">",
-                "<div class=\"kart\">",
-                "<p id=\"js_sayac\">Yukleniyor...</p>",
-                "<button class=\"jsbtn\" onclick=\"artir()\">+1 Artir (JS)</button>",
-                "<button class=\"jsreset\" onclick=\"sifirla()\">Sifirla</button>",
-                "</div>",
-                "<div id=\"duyuru\"><p>Sol kutudaki yesil butona tikladiginizda sifirdan yazdigimiz anka-js motoru calisip DOM agacini aninda gunceller!</p></div>",
-                "</div>",
-                "<script>",
-                "let tiklama = 0;",
-                "document.getElementById(\"js_sayac\").innerText = \"Anka JS Hazir! Tiklama Sayisi: 0\";",
-                "console.log(\"Anka JS v0.2.7 baslatildi!\");",
-                "function artir() {",
-                "  tiklama++;",
-                "  document.getElementById(\"js_sayac\").innerText = \"Tiklama Sayisi: \" + tiklama;",
-                "  console.log(\"Butona tiklandi -> \" + tiklama);",
-                "  if (tiklama >= 5) {",
-                "    document.getElementById(\"js_sayac\").style.color = \"#dc2626\";",
-                "  }",
-                "}",
-                "function sifirla() {",
-                "  tiklama = 0;",
-                "  document.getElementById(\"js_sayac\").innerText = \"Sayac Sifirlandi: 0\";",
-                "  document.getElementById(\"js_sayac\").style.color = \"#065f46\";",
-                "  console.log(\"Sayac sifirlandi\");",
-                "}",
-                "</script>",
-                "</body></html>"
-            )
-        };
-        match parse_http_response(dahili_http) {
+        let dahili_http = dahili_anka_local_http(&url, method, post_body, cookie_header);
+        match parse_http_response(&dahili_http) {
             Ok(r) => r,
             Err(e) => {
                 return LoadedPage::error(format!("Hata [anka-net] Dahili yanit hatasi: {e:?}"));
@@ -739,7 +841,7 @@ fn main() {
     // Ekransız (Headless / `--headless` / CI) ortamda terminal önizlemesi çalışır
     let sayfa = motoru_calistir(&baslangic_adresi, 860);
     println!(
-        "Anka Browser v0.3.1 ({}) [{}] | page_bg={:?} -> {}",
+        "Anka Browser v0.3.2 ({}) [{}] | page_bg={:?} -> {}",
         baslangic_adresi,
         sayfa.page_title.as_deref().unwrap_or("Adsız"),
         sayfa.page_bg,

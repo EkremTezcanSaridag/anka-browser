@@ -65,6 +65,7 @@ pub struct LayoutBox {
     pub is_submit: bool,
     pub is_password: bool,
     pub is_post_form: bool,
+    pub border_radius: u32,
 }
 
 /// CSS genişlik / maksimum genişlik ölçüsü (`px` veya `%`):
@@ -100,6 +101,7 @@ struct ResolvedStyle {
     color: String,
     bg_color: Option<String>,
     border_color: Option<String>,
+    border_radius: u32,
     font_size: u32,
     padding: u32,
     margin: u32,
@@ -116,6 +118,7 @@ impl Default for ResolvedStyle {
             color: "black".to_string(),
             bg_color: None,
             border_color: None,
+            border_radius: 0,
             font_size: 16,
             padding: 0,
             margin: 0,
@@ -299,6 +302,11 @@ fn apply_declaration(decl: &Declaration, style: &mut ResolvedStyle) {
             }
         }
         "border" | "border-color" => style.border_color = extract_border_color(&decl.value),
+        "border-radius" => {
+            if let Some(px) = parse_px(&decl.value) {
+                style.border_radius = px.min(32);
+            }
+        }
         "font-size" => {
             if let Some(px) = parse_px(&decl.value) {
                 style.font_size = px.clamp(10, 64);
@@ -591,6 +599,7 @@ fn layout_node(
                     is_submit: false,
                     is_password: false,
                     is_post_form: false,
+                    border_radius: 4,
                 });
 
                 *inline_x += box_w + 10;
@@ -638,6 +647,7 @@ fn layout_node(
                     is_submit: false,
                     is_password: false,
                     is_post_form: false,
+                    border_radius: 0,
                 });
                 *current_y += 18;
                 return;
@@ -713,6 +723,7 @@ fn layout_node(
                     is_submit: false,
                     is_password: false,
                     is_post_form: false,
+                    border_radius: 0,
                 });
 
                 *current_y += img_h + 14;
@@ -805,6 +816,7 @@ fn layout_node(
                     is_submit,
                     is_password,
                     is_post_form: ctx.form_method_post,
+                    border_radius: 5,
                 });
 
                 *inline_x += box_w + 10;
@@ -978,6 +990,7 @@ fn layout_node(
                     is_submit: false,
                     is_password: false,
                     is_post_form: false,
+                    border_radius: own_style.border_radius,
                 });
 
                 next_ctx.container_painted_bg = true;
@@ -1112,6 +1125,7 @@ fn layout_node(
                         && ctx.onclick.is_none(),
                     is_password: false,
                     is_post_form: ctx.form_method_post,
+                    border_radius: style.border_radius,
                 });
 
                 *inline_x += item_w + 12;
@@ -1172,6 +1186,7 @@ fn layout_node(
                     is_submit: false,
                     is_password: false,
                     is_post_form: false,
+                    border_radius: style.border_radius,
                 });
                 *current_y += pad;
             }
@@ -1216,6 +1231,7 @@ fn layout_node(
                     is_submit: false,
                     is_password: false,
                     is_post_form: false,
+                    border_radius: if has_own_frame { 0 } else { style.border_radius },
                 });
 
                 if idx + 1 < line_count {
@@ -1453,5 +1469,23 @@ mod tests {
         assert!(pw_box.is_post_form);
         assert!(submit_box.is_post_form);
         assert_eq!(submit_box.form_action.as_deref(), Some("/oturum"));
+    }
+
+    #[test]
+    fn test_css_border_radius_ayristirma() {
+        let html = "<body><div class=\"yuvarlak\"><p>Yuvarlak Kose</p></div><a class=\"btn\" href=\"/ok\">Buton</a></body>";
+        let css = ".yuvarlak { background-color: #f8fafc; border-radius: 12px; padding: 8px; } .btn { background-color: #dbeafe; border-radius: 6px; }";
+        let dom = parse_html(html);
+        let kurallar = parse_css(css);
+        let kutular = compute_layout(&dom, &kurallar, 800);
+
+        let kart = kutular
+            .iter()
+            .find(|b| b.tag == "div" && b.bg_color.is_some())
+            .expect("yuvarlak div");
+        let btn = kutular.iter().find(|b| b.tag == "a").expect("btn link");
+
+        assert_eq!(kart.border_radius, 12);
+        assert_eq!(btn.border_radius, 6);
     }
 }

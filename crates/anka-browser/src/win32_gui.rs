@@ -45,7 +45,15 @@ const WM_LBUTTONDOWN: u32 = 0x0201;
 const WM_MOUSEWHEEL: u32 = 0x020A;
 
 const VK_BACK: usize = 0x08;
+const VK_TAB: usize = 0x09;
 const VK_RETURN: usize = 0x0D;
+const VK_SHIFT: i32 = 0x10;
+const VK_CONTROL: i32 = 0x11;
+const VK_ESCAPE: usize = 0x1B;
+const VK_F5: usize = 0x74;
+const PS_SOLID: i32 = 0;
+const NULL_BRUSH: i32 = 5;
+const NULL_PEN: i32 = 8;
 const IDC_ARROW: *const u16 = 32512 as *const u16;
 const IDC_HAND: *const u16 = 32649 as *const u16;
 const TRANSPARENT: i32 = 1;
@@ -191,11 +199,23 @@ unsafe extern "system" {
     fn MoveWindow(hWnd: HWND, x: i32, y: i32, nWidth: i32, nHeight: i32, bRepaint: i32) -> i32;
     fn SendMessageW(hWnd: HWND, msg: u32, wParam: WPARAM, lParam: LPARAM) -> LRESULT;
     fn SetFocus(hWnd: HWND) -> HWND;
+    fn GetKeyState(nVirtKey: i32) -> i16;
 }
 
 #[link(name = "gdi32")]
 unsafe extern "system" {
     fn CreateSolidBrush(color: u32) -> HBRUSH;
+    fn CreatePen(iStyle: i32, cWidth: i32, color: u32) -> HGDIOBJ;
+    fn GetStockObject(i: i32) -> HGDIOBJ;
+    fn RoundRect(
+        hdc: HDC,
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        width: i32,
+        height: i32,
+    ) -> i32;
     fn DeleteObject(ho: HGDIOBJ) -> i32;
     fn SetBkMode(hdc: HDC, mode: i32) -> i32;
     fn SetTextColor(hdc: HDC, color: u32) -> u32;
@@ -957,10 +977,35 @@ unsafe extern "system" fn wnd_proc(
                                 bottom: draw_y + komut.height as i32,
                             };
 
+                            let rad_dia = if komut.border_radius > 0 {
+                                let max_d = (box_rect.right - box_rect.left)
+                                    .min(box_rect.bottom - box_rect.top)
+                                    .max(0);
+                                ((komut.border_radius as i32) * 2).min(max_d)
+                            } else {
+                                0
+                            };
+
                             // Eğer kutunun CSS arka plan rengi (`background-color`) varsa önce kutuyu boya!
                             if let Some(bg) = &komut.bg_color {
                                 let bg_brush = CreateSolidBrush(rgb(bg.r, bg.g, bg.b));
-                                FillRect(hdc, &box_rect, bg_brush);
+                                if rad_dia > 0 {
+                                    let old_b = SelectObject(hdc, bg_brush as HGDIOBJ);
+                                    let old_p = SelectObject(hdc, GetStockObject(NULL_PEN));
+                                    RoundRect(
+                                        hdc,
+                                        box_rect.left,
+                                        box_rect.top,
+                                        box_rect.right,
+                                        box_rect.bottom,
+                                        rad_dia,
+                                        rad_dia,
+                                    );
+                                    SelectObject(hdc, old_p);
+                                    SelectObject(hdc, old_b);
+                                } else {
+                                    FillRect(hdc, &box_rect, bg_brush);
+                                }
                                 DeleteObject(bg_brush as HGDIOBJ);
                             }
 
@@ -1016,15 +1061,35 @@ unsafe extern "system" fn wnd_proc(
                             // Eğer kutunun CSS çerçevesi (`border`) varsa veya odaklı `<input>` ise çiz!
                             let is_focused_input = komut.input_name.is_some()
                                 && st.state.focused_input() == komut.input_name.as_deref();
-                            if is_focused_input {
-                                let border_brush = CreateSolidBrush(rgb(37, 99, 235));
-                                FrameRect(hdc, &box_rect, border_brush);
-                                DeleteObject(border_brush as HGDIOBJ);
-                            } else if let Some(border) = &komut.border_color {
-                                let border_brush =
-                                    CreateSolidBrush(rgb(border.r, border.g, border.b));
-                                FrameRect(hdc, &box_rect, border_brush);
-                                DeleteObject(border_brush as HGDIOBJ);
+                            if is_focused_input || komut.border_color.is_some() {
+                                let (border_c, pen_w) = if is_focused_input {
+                                    (rgb(37, 99, 235), 2)
+                                } else if let Some(b) = &komut.border_color {
+                                    (rgb(b.r, b.g, b.b), 1)
+                                } else {
+                                    (0, 1)
+                                };
+                                if rad_dia > 0 {
+                                    let pen = CreatePen(PS_SOLID, pen_w, border_c);
+                                    let old_b = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                                    let old_p = SelectObject(hdc, pen);
+                                    RoundRect(
+                                        hdc,
+                                        box_rect.left,
+                                        box_rect.top,
+                                        box_rect.right,
+                                        box_rect.bottom,
+                                        rad_dia,
+                                        rad_dia,
+                                    );
+                                    SelectObject(hdc, old_p);
+                                    SelectObject(hdc, old_b);
+                                    DeleteObject(pen);
+                                } else {
+                                    let border_brush = CreateSolidBrush(border_c);
+                                    FrameRect(hdc, &box_rect, border_brush);
+                                    DeleteObject(border_brush as HGDIOBJ);
+                                }
                             }
 
                             let mut text_color = komut.color;
@@ -1194,14 +1259,66 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) {
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-            // Adres çubuğunda Enter tuşuna (`VK_RETURN`) basıldıysa (odaklı sayfa `<input>` yoksa) "Git ->" butonunu tetikle!
-            let input_focused = DURUM
-                .lock()
-                .ok()
-                .is_some_and(|g| g.as_ref().is_some_and(|s| s.state.focused_input().is_some()));
-            if !input_focused && msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN {
-                SendMessageW(hwnd, WM_COMMAND, ID_BTN_GO, 0);
-                continue;
+            if msg.message == WM_KEYDOWN {
+                let ctrl = (GetKeyState(VK_CONTROL) as u16 & 0x8000) != 0;
+                let shift = (GetKeyState(VK_SHIFT) as u16 & 0x8000) != 0;
+                let input_focused = DURUM
+                    .lock()
+                    .ok()
+                    .is_some_and(|g| g.as_ref().is_some_and(|s| s.state.focused_input().is_some()));
+
+                if input_focused && msg.wParam == VK_TAB {
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                        && st.state.focus_next_input(shift)
+                    {
+                        SetFocus(hwnd);
+                        InvalidateRect(hwnd, null(), 1);
+                        continue;
+                    }
+                } else if input_focused && msg.wParam == VK_ESCAPE {
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                        && st.state.blur_input()
+                    {
+                        InvalidateRect(hwnd, null(), 1);
+                        continue;
+                    }
+                } else if msg.wParam == VK_F5 || (ctrl && msg.wParam == b'R' as usize) {
+                    SendMessageW(hwnd, WM_COMMAND, ID_BTN_RELOAD, 0);
+                    continue;
+                } else if ctrl && msg.wParam == b'T' as usize {
+                    SendMessageW(hwnd, WM_COMMAND, ID_BTN_NEW_TAB, 0);
+                    continue;
+                } else if ctrl && msg.wParam == b'W' as usize {
+                    SendMessageW(hwnd, WM_COMMAND, ID_BTN_CLOSE_TAB, 0);
+                    continue;
+                } else if ctrl && msg.wParam == b'L' as usize {
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                    {
+                        st.state.blur_input();
+                        if st.url_edit != 0 {
+                            SetFocus(st.url_edit as HWND);
+                        }
+                    }
+                    InvalidateRect(hwnd, null(), 1);
+                    continue;
+                } else if ctrl && msg.wParam == b'U' as usize {
+                    let cur = DURUM
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.as_ref().map(|s| s.state.current_url().to_string()))
+                        .unwrap_or_default();
+                    if !cur.is_empty() && !cur.starts_with("view-source:") {
+                        sayfayi_yukle_ve_yenile(hwnd, &format!("view-source:{cur}"), true);
+                    }
+                    continue;
+                } else if !input_focused && msg.wParam == VK_RETURN {
+                    // Adres çubuğunda Enter tuşuna basıldıysa "Git ->" butonunu tetikle!
+                    SendMessageW(hwnd, WM_COMMAND, ID_BTN_GO, 0);
+                    continue;
+                }
             }
             TranslateMessage(&msg);
             DispatchMessageW(&msg);

@@ -1,4 +1,4 @@
-// Anka Browser - Çok Süreçli (Multi-Process) Sekme İzolasyonu ve Sıfır-Crate IPC (v0.3.1)
+// Anka Browser - Çok Süreçli (Multi-Process) Sekme İzolasyonu ve Sıfır-Crate IPC (v0.3.2)
 // Her tarayıcı sekmesi, tarayıcı ana penceresinden (`Browser Process`) ayrı bir
 // `--renderer-worker` işletim sistemi alt sürecinde (`Renderer Process`) çalışır.
 // Bir sekme çökerse diğer sekmeler ve tarayıcı penceresi hayatta kalır!
@@ -24,6 +24,7 @@ pub struct RenderSnapshot {
     pub body_len: usize,
     pub shield_blocked: usize,
     pub set_cookies: Vec<String>,
+    pub js_logs: Vec<String>,
 }
 
 impl RenderSnapshot {
@@ -39,6 +40,7 @@ impl RenderSnapshot {
             body_len: page.body_len,
             shield_blocked: page.shield_stats.total_blocked(),
             set_cookies: page.set_cookies.clone(),
+            js_logs: page.js_runtime.logs.clone(),
         }
     }
 
@@ -151,7 +153,7 @@ pub fn serialize_snapshot(snap: &RenderSnapshot) -> String {
     let title_enc = encode_opt_str_hex(snap.page_title.as_deref());
     let status_enc = encode_hex(snap.status_message.as_bytes());
     out.push_str(&format!(
-        "META\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        "META\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
         snap.pid,
         u8::from(snap.crashed),
         snap.status_code,
@@ -161,7 +163,8 @@ pub fn serialize_snapshot(snap: &RenderSnapshot) -> String {
         title_enc,
         status_enc,
         snap.display_list.len(),
-        snap.set_cookies.len()
+        snap.set_cookies.len(),
+        snap.js_logs.len()
     ));
 
     for cmd in &snap.display_list {
@@ -174,7 +177,7 @@ pub fn serialize_snapshot(snap: &RenderSnapshot) -> String {
             ("0".to_string(), String::new())
         };
         out.push_str(&format!(
-            "CMD\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "CMD\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             cmd.x,
             cmd.y,
             cmd.width,
@@ -196,11 +199,15 @@ pub fn serialize_snapshot(snap: &RenderSnapshot) -> String {
             encode_opt_str_hex(cmd.form_action.as_deref()),
             u8::from(cmd.is_submit),
             u8::from(cmd.is_password),
-            u8::from(cmd.is_post_form)
+            u8::from(cmd.is_post_form),
+            cmd.border_radius
         ));
     }
     for cookie in &snap.set_cookies {
         out.push_str(&format!("COOKIE\t{}\n", encode_hex(cookie.as_bytes())));
+    }
+    for log_line in &snap.js_logs {
+        out.push_str(&format!("LOG\t{}\n", encode_hex(log_line.as_bytes())));
     }
     out.push_str("END\n");
     out
@@ -218,7 +225,7 @@ pub fn deserialize_snapshot<R: BufRead>(reader: &mut R) -> Result<RenderSnapshot
     }
 
     let meta_parts: Vec<&str> = header.trim_end_matches(['\r', '\n']).split('\t').collect();
-    if meta_parts.len() != 11 || meta_parts[0] != "META" {
+    if meta_parts.len() != 12 || meta_parts[0] != "META" {
         return Err("Gecersiz IPC META basligi".to_string());
     }
 
@@ -232,6 +239,7 @@ pub fn deserialize_snapshot<R: BufRead>(reader: &mut R) -> Result<RenderSnapshot
     let status_message = decode_hex_string(meta_parts[8]).unwrap_or_default();
     let cmd_count = meta_parts[9].parse::<usize>().unwrap_or(0);
     let cookie_count = meta_parts[10].parse::<usize>().unwrap_or(0);
+    let log_count = meta_parts[11].parse::<usize>().unwrap_or(0);
 
     let mut display_list = Vec::with_capacity(cmd_count);
     for _ in 0..cmd_count {
@@ -243,7 +251,7 @@ pub fn deserialize_snapshot<R: BufRead>(reader: &mut R) -> Result<RenderSnapshot
             return Err("Alt surec veri aktarimi sirasinda sonlandi".to_string());
         }
         let p: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
-        if p.len() != 23 || p[0] != "CMD" {
+        if p.len() != 24 || p[0] != "CMD" {
             return Err("Bozuk IPC CMD satiri".to_string());
         }
 
@@ -287,6 +295,7 @@ pub fn deserialize_snapshot<R: BufRead>(reader: &mut R) -> Result<RenderSnapshot
             is_submit: p[20] == "1",
             is_password: p[21] == "1",
             is_post_form: p[22] == "1",
+            border_radius: p[23].parse().unwrap_or(0),
         });
     }
 
@@ -305,6 +314,24 @@ pub fn deserialize_snapshot<R: BufRead>(reader: &mut R) -> Result<RenderSnapshot
             .ok_or_else(|| "Bozuk IPC COOKIE satiri".to_string())?;
         if let Some(cookie_line) = decode_hex_string(hex) {
             set_cookies.push(cookie_line);
+        }
+    }
+
+    let mut js_logs = Vec::with_capacity(log_count);
+    for _ in 0..log_count {
+        let mut line = String::new();
+        let read_n = reader
+            .read_line(&mut line)
+            .map_err(|e| format!("IPC LOG okuma hatasi: {e}"))?;
+        if read_n == 0 {
+            return Err("Alt surec log aktarimi sirasinda sonlandi".to_string());
+        }
+        let hex = line
+            .trim_end_matches(['\r', '\n'])
+            .strip_prefix("LOG\t")
+            .ok_or_else(|| "Bozuk IPC LOG satiri".to_string())?;
+        if let Some(log_msg) = decode_hex_string(hex) {
+            js_logs.push(log_msg);
         }
     }
 
@@ -327,6 +354,7 @@ pub fn deserialize_snapshot<R: BufRead>(reader: &mut R) -> Result<RenderSnapshot
         body_len,
         shield_blocked,
         set_cookies,
+        js_logs,
     })
 }
 
@@ -701,6 +729,14 @@ mod tests {
         assert_eq!(decoded.page_title, original.page_title);
         assert_eq!(decoded.status_message, original.status_message);
         assert_eq!(decoded.display_list.len(), original.display_list.len());
+        assert_eq!(decoded.js_logs, original.js_logs);
+        assert!(!decoded.js_logs.is_empty());
+        assert!(
+            decoded
+                .display_list
+                .iter()
+                .any(|c| c.border_radius == 8)
+        );
 
         // Gömülü bitmap görsel pikselleri de bozulmadan taşınmış olmalı!
         let orig_img = original

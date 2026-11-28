@@ -1,6 +1,9 @@
-// Anka Browser - Çerez Kutusu (Cookie Jar) ve Oturum Yönetimi (RFC 6265 Temelleri - v0.3.1)
+// Anka Browser - Çerez Kutusu (Cookie Jar) ve Oturum Yönetimi (RFC 6265 Temelleri - v0.3.2)
 // Sıfır üçüncü parti crate ile sunucudan gelen `Set-Cookie` başlıklarını ayrıştırır,
-// domain/path/secure güvenlik kurallarını uygular ve sonraki isteklerde `Cookie:` başlığı üretir.
+// domain/path/secure/Expires/Max-Age kurallarını uygular, TSV formatında diske kaydeder
+// ve sonraki isteklerde `Cookie:` başlığı üretir.
+
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anka_url::Url;
 
@@ -13,6 +16,81 @@ pub struct Cookie {
     pub path: String,
     pub secure: bool,
     pub http_only: bool,
+    /// `Max-Age` veya `Expires` varsa Unix zaman damgası (saniye); `None` ise oturum çerezidir.
+    pub expires_epoch: Option<u64>,
+}
+
+fn now_epoch_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn month_number(mon: &str) -> Option<i64> {
+    match mon.to_ascii_lowercase().as_str() {
+        "jan" => Some(1),
+        "feb" => Some(2),
+        "mar" => Some(3),
+        "apr" => Some(4),
+        "may" => Some(5),
+        "jun" => Some(6),
+        "jul" => Some(7),
+        "aug" => Some(8),
+        "sep" => Some(9),
+        "oct" => Some(10),
+        "nov" => Some(11),
+        "dec" => Some(12),
+        _ => None,
+    }
+}
+
+/// Standart `Expires` HTTP tarihini (`Wed, 21 Oct 2026 07:28:00 GMT` veya tireli biçim)
+/// Unix zaman damgasına (saniye) çevirir.
+pub fn parse_http_date_epoch(raw: &str) -> Option<u64> {
+    let after_comma = raw
+        .split_once(',')
+        .map(|(_, rest)| rest.trim())
+        .unwrap_or_else(|| raw.trim());
+    // "21-Oct-2026 07:28:00 GMT" gibi tireli tarih ayraçlarını boşluğa çevir:
+    let mut normalized = String::with_capacity(after_comma.len());
+    for ch in after_comma.chars() {
+        normalized.push(if ch == '-' { ' ' } else { ch });
+    }
+    let parts: Vec<&str> = normalized.split_whitespace().collect();
+    if parts.len() < 4 {
+        return None;
+    }
+
+    let day = parts[0].parse::<i64>().ok()?;
+    let month = month_number(parts[1])?;
+    let year = parts[2].parse::<i64>().ok()?;
+    if !(1..=31).contains(&day) || year < 0 {
+        return None;
+    }
+
+    let mut time_parts = parts[3].split(':');
+    let hh = time_parts.next()?.parse::<u64>().ok()?;
+    let mm = time_parts.next()?.parse::<u64>().ok()?;
+    let ss = time_parts.next()?.parse::<u64>().ok()?;
+    if hh >= 24 || mm >= 60 || ss >= 60 {
+        return None;
+    }
+
+    if year < 1970 {
+        return Some(0);
+    }
+    let y = year - i64::from(month <= 2);
+    let era = y.div_euclid(400);
+    let yoe = y.rem_euclid(400);
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe - 719_468;
+    if days < 0 {
+        return Some(0);
+    }
+
+    Some((days as u64) * 86_400 + hh * 3_600 + mm * 60 + ss)
 }
 
 /// Tarayıcının tüm sekmeler arasında paylaştığı çerez deposu (`CookieJar`):
@@ -66,6 +144,9 @@ impl CookieJar {
         let mut secure = false;
         let mut http_only = false;
         let mut expired = false;
+        let mut max_age_seen = false;
+        let mut expires_epoch: Option<u64> = None;
+        let now = now_epoch_secs();
 
         for attr in parts {
             let trimmed = attr.trim();
@@ -88,8 +169,24 @@ impl CookieJar {
                     "path" if val_t.starts_with('/') => {
                         path = val_t.to_string();
                     }
-                    "max-age" if val_t.parse::<i64>().is_ok_and(|sec| sec <= 0) => {
-                        expired = true;
+                    "max-age" => {
+                        if let Ok(sec) = val_t.parse::<i64>() {
+                            max_age_seen = true;
+                            if sec <= 0 {
+                                expired = true;
+                            } else {
+                                expires_epoch = Some(now.saturating_add(sec as u64));
+                            }
+                        }
+                    }
+                    "expires" if !max_age_seen => {
+                        if let Some(epoch) = parse_http_date_epoch(val_t) {
+                            if epoch <= now {
+                                expired = true;
+                            } else {
+                                expires_epoch = Some(epoch);
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -113,8 +210,16 @@ impl CookieJar {
                 path,
                 secure,
                 http_only,
+                expires_epoch,
             });
         }
+    }
+
+    /// Süresi dolmuş çerezleri kavanozdan temizler.
+    pub fn prune_expired(&mut self) {
+        let now = now_epoch_secs();
+        self.cookies
+            .retain(|c| c.expires_epoch.is_none_or(|exp| exp > now));
     }
 
     /// HTTP yanıtındaki tüm `Set-Cookie` başlıklarını işler.
@@ -133,13 +238,15 @@ impl CookieJar {
         }
         let host = url.host.trim().to_lowercase();
         let is_https = url.scheme == "https" || host == "anka.local";
+        let now = now_epoch_secs();
 
         let mut matched: Vec<String> = Vec::new();
         for c in &self.cookies {
+            let not_expired = c.expires_epoch.is_none_or(|exp| exp > now);
             let domain_ok = host == c.domain || host.ends_with(&format!(".{}", c.domain));
             let path_ok = url.path.starts_with(&c.path);
             let secure_ok = !c.secure || is_https;
-            if domain_ok && path_ok && secure_ok {
+            if not_expired && domain_ok && path_ok && secure_ok {
                 matched.push(format!("{}={}", c.name, c.value));
             }
         }
@@ -149,6 +256,62 @@ impl CookieJar {
         } else {
             Some(matched.join("; "))
         }
+    }
+
+    /// Kalıcı (süresi henüz dolmamış `expires_epoch` taşıyan) çerezleri TSV metnine çevirir.
+    pub fn serialize_tsv(&self) -> String {
+        let now = now_epoch_secs();
+        let sanitize = |s: &str| s.replace(['\t', '\r', '\n'], " ");
+        let mut out = String::new();
+        for c in &self.cookies {
+            if let Some(exp) = c.expires_epoch
+                && exp > now
+            {
+                out.push_str(&format!(
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                    sanitize(&c.domain),
+                    sanitize(&c.path),
+                    sanitize(&c.name),
+                    sanitize(&c.value),
+                    u8::from(c.secure),
+                    u8::from(c.http_only),
+                    exp
+                ));
+            }
+        }
+        out
+    }
+
+    /// Diskten okunan TSV verisinden yalnızca süresi dolmamış kalıcı çerezleri geri yükler.
+    pub fn deserialize_tsv(raw: &str) -> Self {
+        let now = now_epoch_secs();
+        let mut cookies = Vec::new();
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let p: Vec<&str> = trimmed.split('\t').collect();
+            if p.len() != 7 {
+                continue;
+            }
+            let Ok(exp) = p[6].parse::<u64>() else {
+                continue;
+            };
+            if exp <= now || p[0].is_empty() || p[2].is_empty() {
+                continue;
+            }
+            cookies.push(Cookie {
+                domain: p[0].to_string(),
+                path: p[1].to_string(),
+                name: p[2].to_string(),
+                value: p[3].to_string(),
+                secure: p[4] == "1",
+                http_only: p[5] == "1",
+                expires_epoch: Some(exp),
+            });
+        }
+        Self { cookies }
     }
 }
 
@@ -211,5 +374,37 @@ mod tests {
         jar.store_header_line(&url, "anka_user=; Path=/; Max-Age=0");
         assert_eq!(jar.count(), 0);
         assert_eq!(jar.cookie_header_for(&url), None);
+    }
+
+    #[test]
+    fn test_expires_tarih_ayristirma_ve_kalici_tsv_depolama() {
+        let mut jar = CookieJar::new();
+        let url = Url::parse("https://anka.local/oturum").unwrap();
+
+        // Gelecek tarihli kalici cerez saklanmali, gecmis tarihli (1999) reddedilmeli:
+        jar.store_header_line(
+            &url,
+            "tema=koyu; Path=/; Expires=Wed, 21 Oct 2099 07:28:00 GMT",
+        );
+        jar.store_header_line(
+            &url,
+            "eski=silinmeli; Path=/; Expires=Thu, 01 Jan 1999 00:00:00 GMT",
+        );
+        jar.store_header_line(&url, "gecici=oturum; Path=/");
+        jar.store_header_line(&url, "token=7gun; Path=/; Max-Age=604800");
+
+        assert_eq!(jar.count(), 3);
+        let tsv = jar.serialize_tsv();
+        // Yalnızca `Expires`/`Max-Age > 0` taşıyan kalıcı çerezler TSV'ye yazılır:
+        assert!(tsv.contains("tema\tkoyu"));
+        assert!(tsv.contains("token\t7gun"));
+        assert!(!tsv.contains("gecici"));
+
+        let restored = CookieJar::deserialize_tsv(&tsv);
+        assert_eq!(restored.count(), 2);
+        assert_eq!(
+            restored.cookie_header_for(&url).as_deref(),
+            Some("tema=koyu; token=7gun")
+        );
     }
 }
