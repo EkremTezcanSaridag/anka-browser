@@ -96,6 +96,7 @@ Anka'nın çekirdek motoru bir web sayfasını aşağıdaki boru hattı (pipelin
   - [x] Çok süreçli (Multi-process) sekme izolasyonu (`v0.3.0`: her sekme ayrı `--renderer-worker` OS sürecinde çalışır; `stdin/stdout` pipe IPC, PID takibi ve çökme kurtarma)
   - [x] Çerez kavanozu (`CookieJar`: `Set-Cookie`/`Cookie:`, `Domain`/`Path`/`Secure`/`Max-Age=0`), HTTP `POST` form gönderimi, maskeli `<input type="password">` (`•`) ve dahili `http://anka.local/oturum` oturum testi (`v0.3.1`)
   - [x] Kalıcı çerezler (`cookies.tsv` & `Expires` HTTP tarih ayrıştırıcı), CSS `border-radius` yuvarlatılmış köşeler (Cairo & Win32 GDI), `Tab`/`Shift+Tab`/`Ctrl+T/W/L/R/U/F5` kısayolları, `view-source:` kaynak görüntüleyici ve `http://anka.local/gelistirici` DevTools müfettişi (`v0.3.2`)
+  - [x] Kalıcı gezinme geçmişi (`history.tsv`, `http://anka.local/gecmis` arama/temizleme & `Ctrl+H`), çok satırlı `<textarea>` form düzenleme (`http://anka.local/not`) ve `anka-js` `document.querySelector` + `addEventListener("click", ...)` (`v0.3.3`)
 
 ---
 

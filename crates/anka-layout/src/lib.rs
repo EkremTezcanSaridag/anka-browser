@@ -65,6 +65,7 @@ pub struct LayoutBox {
     pub is_submit: bool,
     pub is_password: bool,
     pub is_post_form: bool,
+    pub is_multiline: bool,
     pub border_radius: u32,
 }
 
@@ -599,6 +600,7 @@ fn layout_node(
                     is_submit: false,
                     is_password: false,
                     is_post_form: false,
+                    is_multiline: false,
                     border_radius: 4,
                 });
 
@@ -647,6 +649,7 @@ fn layout_node(
                     is_submit: false,
                     is_password: false,
                     is_post_form: false,
+                    is_multiline: false,
                     border_radius: 0,
                 });
                 *current_y += 18;
@@ -723,6 +726,7 @@ fn layout_node(
                     is_submit: false,
                     is_password: false,
                     is_post_form: false,
+                    is_multiline: false,
                     border_radius: 0,
                 });
 
@@ -816,11 +820,79 @@ fn layout_node(
                     is_submit,
                     is_password,
                     is_post_form: ctx.form_method_post,
+                    is_multiline: false,
                     border_radius: 5,
                 });
 
                 *inline_x += box_w + 10;
                 *last_inline_height = (*last_inline_height).max(box_h);
+                return;
+            }
+
+            // Çok satırlı metin alanı (`<textarea name="..." rows="3" placeholder="...">`):
+            if tag_name == "textarea" {
+                if *inline_x > base_x {
+                    *current_y += *last_inline_height + 10;
+                    *inline_x = base_x;
+                    *last_inline_height = 0;
+                }
+
+                let rows = node
+                    .get_attribute("rows")
+                    .and_then(|r| r.trim().parse::<u32>().ok())
+                    .unwrap_or(3)
+                    .clamp(2, 10);
+                let inner_default: String = node
+                    .children
+                    .iter()
+                    .filter_map(|c| match &c.node_type {
+                        NodeType::Text(t) => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let placeholder = node.get_attribute("placeholder").unwrap_or("").trim();
+                let input_name = node
+                    .get_attribute("name")
+                    .map(|n| n.trim().to_string())
+                    .filter(|n| !n.is_empty())
+                    .or_else(|| Some("mesaj".to_string()));
+                let display_text = if !inner_default.trim().is_empty() {
+                    inner_default.trim().to_string()
+                } else if !placeholder.is_empty() {
+                    placeholder.to_string()
+                } else {
+                    "Cok satirli metin yazmak icin tiklayin...".to_string()
+                };
+
+                let box_h = rows * 20 + 14;
+                let box_w = (avail_width.saturating_sub(60)).clamp(200, 460);
+
+                boxes.push(LayoutBox {
+                    tag: "textarea".to_string(),
+                    text: display_text,
+                    x: base_x,
+                    y: *current_y,
+                    width: box_w,
+                    height: box_h,
+                    color: "#64748b".to_string(),
+                    bg_color: Some("#ffffff".to_string()),
+                    border_color: Some("#94a3b8".to_string()),
+                    font_size: 15,
+                    padding: 6,
+                    text_align: "left".to_string(),
+                    href: None,
+                    image_src: None,
+                    onclick: None,
+                    input_name,
+                    form_action: ctx.form_action.clone(),
+                    is_submit: false,
+                    is_password: false,
+                    is_post_form: ctx.form_method_post,
+                    is_multiline: true,
+                    border_radius: 6,
+                });
+
+                *current_y += box_h + 12;
                 return;
             }
 
@@ -990,6 +1062,7 @@ fn layout_node(
                     is_submit: false,
                     is_password: false,
                     is_post_form: false,
+                    is_multiline: false,
                     border_radius: own_style.border_radius,
                 });
 
@@ -1125,6 +1198,7 @@ fn layout_node(
                         && ctx.onclick.is_none(),
                     is_password: false,
                     is_post_form: ctx.form_method_post,
+                    is_multiline: false,
                     border_radius: style.border_radius,
                 });
 
@@ -1186,6 +1260,7 @@ fn layout_node(
                     is_submit: false,
                     is_password: false,
                     is_post_form: false,
+                    is_multiline: false,
                     border_radius: style.border_radius,
                 });
                 *current_y += pad;
@@ -1231,6 +1306,7 @@ fn layout_node(
                     is_submit: false,
                     is_password: false,
                     is_post_form: false,
+                    is_multiline: false,
                     border_radius: if has_own_frame { 0 } else { style.border_radius },
                 });
 
@@ -1487,5 +1563,22 @@ mod tests {
 
         assert_eq!(kart.border_radius, 12);
         assert_eq!(btn.border_radius, 6);
+    }
+
+    #[test]
+    fn test_textarea_cok_satirli_yerlesim() {
+        let html = "<body><form action=\"/not\" method=\"POST\"><textarea name=\"icerik\" rows=\"4\" placeholder=\"Not yaz...\"></textarea><input type=\"submit\" value=\"Gonder\"></form></body>";
+        let dom = parse_html(html);
+        let kutular = compute_layout(&dom, &[], 800);
+
+        let area = kutular
+            .iter()
+            .find(|b| b.tag == "textarea")
+            .expect("textarea kutusu");
+        assert!(area.is_multiline);
+        assert!(area.is_post_form);
+        assert_eq!(area.input_name.as_deref(), Some("icerik"));
+        assert_eq!(area.text, "Not yaz...");
+        assert_eq!(area.height, 94);
     }
 }

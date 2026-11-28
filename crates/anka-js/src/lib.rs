@@ -520,10 +520,56 @@ impl JsRuntime {
                 *pos += 3;
                 let val = self.eval_expr(tokens, pos, dom, steps);
                 let text = val.to_js_string();
-                if let Some(node) = dom.find_by_id_mut(&target_id) {
+                if let Some(node) = resolve_dom_node(dom, &target_id) {
                     node.set_text(&text);
                 }
                 return val;
+            }
+
+            // `.addEventListener("click", handler)`
+            if let (
+                Some(Token::Dot),
+                Some(Token::Ident(method_name)),
+                Some(Token::LParen),
+            ) = (tokens.get(*pos), tokens.get(*pos + 1), tokens.get(*pos + 2))
+                && method_name == "addEventListener"
+            {
+                *pos += 3;
+                let args = self.parse_call_args(tokens, pos, dom, steps);
+                let event_type = args.first().map_or_else(String::new, JsValue::to_js_string);
+                let raw_handler = args.get(1).map_or_else(String::new, JsValue::to_js_string);
+                if event_type.eq_ignore_ascii_case("click") && !raw_handler.trim().is_empty() {
+                    let h = raw_handler.trim();
+                    let call_code = if h.contains('(') || h.contains(';') {
+                        h.to_string()
+                    } else {
+                        format!("{h}()")
+                    };
+                    if let Some(node) = resolve_dom_node(dom, &target_id) {
+                        node.set_attribute("onclick", &call_code);
+                    }
+                }
+                return JsValue::Undefined;
+            }
+
+            // `.setAttribute("attr", "val")`
+            if let (
+                Some(Token::Dot),
+                Some(Token::Ident(method_name)),
+                Some(Token::LParen),
+            ) = (tokens.get(*pos), tokens.get(*pos + 1), tokens.get(*pos + 2))
+                && method_name == "setAttribute"
+            {
+                *pos += 3;
+                let args = self.parse_call_args(tokens, pos, dom, steps);
+                if args.len() >= 2 {
+                    let attr = args[0].to_js_string();
+                    let val_s = args[1].to_js_string();
+                    if let Some(node) = resolve_dom_node(dom, &target_id) {
+                        node.set_attribute(&attr, &val_s);
+                    }
+                }
+                return JsValue::Undefined;
             }
 
             // `.style.color = ...` veya `.style.backgroundColor = ...`
@@ -550,7 +596,7 @@ impl JsRuntime {
                 *pos += 5;
                 let val = self.eval_expr(tokens, pos, dom, steps);
                 let css_val = val.to_js_string();
-                if let Some(node) = dom.find_by_id_mut(&target_id) {
+                if let Some(node) = resolve_dom_node(dom, &target_id) {
                     let mevcut = node.get_attribute("style").unwrap_or("").to_string();
                     let yeni_stil = if mevcut.trim().is_empty() {
                         format!("{css_key}: {css_val};")
@@ -568,7 +614,7 @@ impl JsRuntime {
         self.eval_expr(tokens, pos, dom, steps)
     }
 
-    /// `document.getElementById("...")` veya `ElementRef` tutan bir değişken adını yakalayıp ID döndürür.
+    /// `document.getElementById("...")`, `document.querySelector("...")` veya `ElementRef` değişkenini çözer.
     fn try_parse_element_target(
         &mut self,
         tokens: &[Token],
@@ -576,7 +622,7 @@ impl JsRuntime {
         dom: &mut DomNode,
         steps: &mut usize,
     ) -> Option<String> {
-        // 1. `document.getElementById("...")`
+        // 1. `document.getElementById("...")` veya `document.querySelector("...")`
         if let (
             Some(Token::Ident(doc)),
             Some(Token::Dot),
@@ -588,14 +634,16 @@ impl JsRuntime {
             tokens.get(*pos + 2),
             tokens.get(*pos + 3),
         ) && doc == "document"
-            && method == "getElementById"
+            && (method == "getElementById" || method == "querySelector")
         {
+            let is_qs = method == "querySelector";
             *pos += 4;
             let arg = self.eval_expr(tokens, pos, dom, steps);
             if matches!(tokens.get(*pos), Some(Token::RParen)) {
                 *pos += 1;
             }
-            return Some(arg.to_js_string());
+            let s = arg.to_js_string();
+            return Some(if is_qs { format!("qs:{s}") } else { s });
         }
 
         // 2. Daha önce `let kutu = document.getElementById("...");` ile saklanmış değişken
@@ -750,6 +798,29 @@ impl JsRuntime {
                 }
                 v
             }
+            Token::Function => {
+                // Anonim callback fonksiyonu: `function() { ... }`
+                *pos += 1;
+                if matches!(tokens.get(*pos), Some(Token::LParen)) {
+                    *pos += 1;
+                    while *pos < tokens.len() && !matches!(tokens[*pos], Token::RParen) {
+                        *pos += 1;
+                    }
+                    if matches!(tokens.get(*pos), Some(Token::RParen)) {
+                        *pos += 1;
+                    }
+                }
+                let body = extract_brace_block(tokens, pos);
+                let anon_name = format!("__anka_cb_{}", self.functions.len());
+                self.functions.insert(
+                    anon_name.clone(),
+                    JsFunction {
+                        params: Vec::new(),
+                        body,
+                    },
+                );
+                JsValue::Str(format!("{anon_name}()"))
+            }
             Token::Ident(name) => {
                 *pos += 1;
 
@@ -772,23 +843,29 @@ impl JsRuntime {
                     *pos += 1;
                     if let Some(Token::Ident(prop)) = tokens.get(*pos).cloned() {
                         *pos += 1;
-                        if prop == "getElementById" && matches!(tokens.get(*pos), Some(Token::LParen))
+                        if (prop == "getElementById" || prop == "querySelector")
+                            && matches!(tokens.get(*pos), Some(Token::LParen))
                         {
+                            let is_qs = prop == "querySelector";
                             *pos += 1;
                             let args = self.parse_call_args(tokens, pos, dom, steps);
-                            let id = args.first().map_or_else(String::new, JsValue::to_js_string);
+                            let raw_arg = args.first().map_or_else(String::new, JsValue::to_js_string);
+                            let target_ref = if is_qs {
+                                format!("qs:{raw_arg}")
+                            } else {
+                                raw_arg
+                            };
                             // Ardından `.innerText` veya `.textContent` geliyorsa doğrudan metni oku:
                             if matches!(tokens.get(*pos), Some(Token::Dot))
                                 && let Some(Token::Ident(sub)) = tokens.get(*pos + 1).cloned()
                                 && (sub == "innerText" || sub == "textContent")
                             {
                                 *pos += 2;
-                                let txt = dom
-                                    .find_by_id_mut(&id)
+                                let txt = resolve_dom_node(dom, &target_ref)
                                     .map_or_else(String::new, |n| n.get_text());
                                 return JsValue::Str(txt);
                             }
-                            return JsValue::ElementRef(id);
+                            return JsValue::ElementRef(target_ref);
                         }
                         if prop == "title" {
                             return JsValue::Str(
@@ -827,24 +904,24 @@ impl JsRuntime {
                     return JsValue::Undefined;
                 }
 
-                // 4. Değişken okuması (+ eğer `ElementRef` ise `.innerText` okuması)
-                let val = self
-                    .variables
-                    .get(&name)
-                    .cloned()
-                    .unwrap_or(JsValue::Undefined);
-                if let JsValue::ElementRef(ref id) = val
-                    && matches!(tokens.get(*pos), Some(Token::Dot))
-                    && let Some(Token::Ident(sub)) = tokens.get(*pos + 1).cloned()
-                    && (sub == "innerText" || sub == "textContent")
-                {
-                    *pos += 2;
-                    let txt = dom
-                        .find_by_id_mut(id)
-                        .map_or_else(String::new, |n| n.get_text());
-                    return JsValue::Str(txt);
+                // 4. Değişken veya fonksiyon referansı okuması (+ `.innerText` okuması)
+                if let Some(val) = self.variables.get(&name).cloned() {
+                    if let JsValue::ElementRef(ref id) = val
+                        && matches!(tokens.get(*pos), Some(Token::Dot))
+                        && let Some(Token::Ident(sub)) = tokens.get(*pos + 1).cloned()
+                        && (sub == "innerText" || sub == "textContent")
+                    {
+                        *pos += 2;
+                        let txt = resolve_dom_node(dom, id)
+                            .map_or_else(String::new, |n| n.get_text());
+                        return JsValue::Str(txt);
+                    }
+                    return val;
                 }
-                val
+                if self.functions.contains_key(&name) {
+                    return JsValue::Str(format!("{name}()"));
+                }
+                JsValue::Undefined
             }
             _ => {
                 *pos += 1;
@@ -874,6 +951,15 @@ impl JsRuntime {
             *pos += 1;
         }
         args
+    }
+}
+
+/// `ElementRef` anahtarına göre (`qs:...` ise seçiciyle, değilse `id` ile) DOM düğümünü bulur.
+fn resolve_dom_node<'a>(dom: &'a mut DomNode, ref_str: &str) -> Option<&'a mut DomNode> {
+    if let Some(selector) = ref_str.strip_prefix("qs:") {
+        dom.find_by_selector_mut(selector)
+    } else {
+        dom.find_by_id_mut(ref_str)
     }
 }
 
@@ -973,6 +1059,58 @@ mod tests {
         assert_eq!(
             dom.find_by_id_mut("sayac").unwrap().get_text(),
             "Harika! Sayac: 2"
+        );
+    }
+
+    #[test]
+    fn test_queryselector_ve_addeventlistener_click() {
+        let mut dom = parse_html(
+            "<body><p id=\"durum\">Bekliyor</p><button class=\"reset-btn\">Sifirla</button></body>",
+        );
+        let mut js = JsRuntime::new();
+
+        js.eval(
+            r##"
+            function yenile() {
+                document.querySelector("#durum").innerText = "Sifirlandi!";
+            }
+            let dugme = document.querySelector(".reset-btn");
+            dugme.addEventListener("click", yenile);
+            dugme.setAttribute("data-ok", "evet");
+            "##,
+            &mut dom,
+        );
+
+        let btn = dom.find_by_selector_mut(".reset-btn").unwrap();
+        assert_eq!(btn.get_attribute("onclick"), Some("yenile()"));
+        assert_eq!(btn.get_attribute("data-ok"), Some("evet"));
+
+        let olay = btn.get_attribute("onclick").unwrap().to_string();
+        js.eval(&olay, &mut dom);
+        assert_eq!(
+            dom.find_by_selector_mut("#durum").unwrap().get_text(),
+            "Sifirlandi!"
+        );
+
+        // Anonim `function() { ... }` callback desteği:
+        js.eval(
+            r##"
+            document.querySelector(".reset-btn").addEventListener("click", function() {
+                document.querySelector("#durum").innerText = "Anonim Tetiklendi";
+            });
+            "##,
+            &mut dom,
+        );
+        let anon_cb = dom
+            .find_by_selector_mut(".reset-btn")
+            .unwrap()
+            .get_attribute("onclick")
+            .unwrap()
+            .to_string();
+        js.eval(&anon_cb, &mut dom);
+        assert_eq!(
+            dom.find_by_id_mut("durum").unwrap().get_text(),
+            "Anonim Tetiklendi"
         );
     }
 }

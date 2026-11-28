@@ -4,13 +4,14 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anka_net::cookies::CookieJar;
 use anka_paint::PaintCommand;
 use anka_url::Url;
 
 use crate::process_ipc::{RenderSnapshot, TabWorkerClient};
-use crate::{html_escape, normalize_address};
+use crate::{extract_form_field, html_escape, normalize_address};
 
 /// Kullanıcının web sayfası tuvaline tıkladığında tetiklenebilecek eylem türleri:
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,12 +54,23 @@ pub struct Bookmark {
     pub url: String,
 }
 
+/// Ziyaret edilen tek bir sayfa geçmişi kaydı (`history.tsv`):
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub title: String,
+    pub url: String,
+    pub visited_epoch: u64,
+}
+
+const MAX_HISTORY_ENTRIES: usize = 200;
+
 /// Tüm açık sekmeleri (`tabs`), aktif sekme indeksini (`active_tab`) ve
-/// diskte kalıcı olarak saklanan yer imlerini (`bookmarks`) yöneten ana tarayıcı durumu:
+/// diskte kalıcı olarak saklanan yer imleri, çerezler ve gezinme geçmişini yöneten ana tarayıcı durumu:
 pub struct BrowserState {
     pub tabs: Vec<TabState>,
     pub active_tab: usize,
     pub bookmarks: Vec<Bookmark>,
+    pub history_entries: Vec<HistoryEntry>,
     pub viewport_width: u32,
     /// Anka Kalkan (Reklam & İzleyici Engelleyici) açık mı?
     pub shield_enabled: bool,
@@ -68,6 +80,8 @@ pub struct BrowserState {
     bookmarks_file: Option<PathBuf>,
     /// Kalıcı çerezlerin kaydedileceği dosya yolu (`None` ise disk kaydı yapılmaz)
     cookies_file: Option<PathBuf>,
+    /// Ziyaret geçmişinin kaydedileceği dosya yolu (`None` ise disk kaydı yapılmaz)
+    history_file: Option<PathBuf>,
 }
 
 fn default_config_file(filename: &str) -> Option<PathBuf> {
@@ -97,6 +111,65 @@ pub fn default_bookmarks_path() -> Option<PathBuf> {
 /// İşletim sistemine uygun standart kalıcı çerez dosyası yolunu döndürür:
 pub fn default_cookies_path() -> Option<PathBuf> {
     default_config_file("cookies.tsv")
+}
+
+/// İşletim sistemine uygun standart kalıcı gezinme geçmişi dosyası yolunu döndürür:
+pub fn default_history_path() -> Option<PathBuf> {
+    default_config_file("history.tsv")
+}
+
+fn format_epoch_utc(epoch: u64) -> String {
+    let days = (epoch / 86_400) as i64;
+    let rem = epoch % 86_400;
+    let hh = rem / 3_600;
+    let mm = (rem % 3_600) / 60;
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = mp + if mp < 10 { 3 } else { -9 };
+    let year = y + i64::from(m <= 2);
+    format!("{year:04}-{m:02}-{d:02} {hh:02}:{mm:02} UTC")
+}
+
+pub fn serialize_history(entries: &[HistoryEntry]) -> String {
+    let mut out = String::new();
+    for h in entries {
+        let clean_title = h.title.replace(['\t', '\r', '\n'], " ");
+        let clean_url = h.url.replace(['\t', '\r', '\n'], "");
+        out.push_str(&format!("{}\t{}\t{}\n", h.visited_epoch, clean_title, clean_url));
+    }
+    out
+}
+
+pub fn deserialize_history(raw: &str) -> Vec<HistoryEntry> {
+    let mut list = Vec::new();
+    for line in raw.lines() {
+        let mut it = line.splitn(3, '\t');
+        let Some(ep_s) = it.next() else { continue };
+        let Some(title) = it.next() else { continue };
+        let Some(url) = it.next() else { continue };
+        let Ok(visited_epoch) = ep_s.trim().parse::<u64>() else {
+            continue;
+        };
+        let u = url.trim();
+        if u.is_empty() {
+            continue;
+        }
+        let t = title.trim();
+        list.push(HistoryEntry {
+            title: if t.is_empty() { u.to_string() } else { t.to_string() },
+            url: u.to_string(),
+            visited_epoch,
+        });
+    }
+    list.truncate(MAX_HISTORY_ENTRIES);
+    list
 }
 
 /// Yer imlerini basit, insan tarafından okunabilir TSV (`baslik\turl`) metnine dönüştürür.
@@ -166,14 +239,24 @@ fn default_bookmarks() -> Vec<Bookmark> {
 }
 
 impl BrowserState {
-    /// Başlangıç adresi ve pencere genişliği ile ilk sekmeyi ve diskteki kalıcı yer imleri/çerezleri yükler.
+    /// Başlangıç adresi ve pencere genişliği ile ilk sekmeyi ve diskteki kalıcı verileri yükler.
     pub fn new(initial_address: &str, viewport_width: u32) -> Self {
-        let (bookmarks_path, cookies_path) = if cfg!(test) {
-            (None, None)
+        let (bookmarks_path, cookies_path, history_path) = if cfg!(test) {
+            (None, None, None)
         } else {
-            (default_bookmarks_path(), default_cookies_path())
+            (
+                default_bookmarks_path(),
+                default_cookies_path(),
+                default_history_path(),
+            )
         };
-        Self::with_storage_paths(initial_address, viewport_width, bookmarks_path, cookies_path)
+        Self::with_all_storage_paths(
+            initial_address,
+            viewport_width,
+            bookmarks_path,
+            cookies_path,
+            history_path,
+        )
     }
 
     /// Belirli bir yer imi dosya yoluyla (gerçek disk veya test geçici dosyası) `BrowserState` başlatır.
@@ -183,15 +266,33 @@ impl BrowserState {
         viewport_width: u32,
         bookmarks_file: Option<PathBuf>,
     ) -> Self {
-        Self::with_storage_paths(initial_address, viewport_width, bookmarks_file, None)
+        Self::with_all_storage_paths(initial_address, viewport_width, bookmarks_file, None, None)
     }
 
-    /// Yer imi ve kalıcı çerez dosya yollarıyla (gerçek disk veya izole test dosyaları) `BrowserState` başlatır.
+    /// Yer imi ve kalıcı çerez dosya yollarıyla (test uyumluluğu için) `BrowserState` başlatır.
+    #[cfg(test)]
     pub fn with_storage_paths(
         initial_address: &str,
         viewport_width: u32,
         bookmarks_file: Option<PathBuf>,
         cookies_file: Option<PathBuf>,
+    ) -> Self {
+        Self::with_all_storage_paths(
+            initial_address,
+            viewport_width,
+            bookmarks_file,
+            cookies_file,
+            None,
+        )
+    }
+
+    /// Yer imi, kalıcı çerez ve geçmiş dosya yollarıyla `BrowserState` başlatır.
+    pub fn with_all_storage_paths(
+        initial_address: &str,
+        viewport_width: u32,
+        bookmarks_file: Option<PathBuf>,
+        cookies_file: Option<PathBuf>,
+        history_file: Option<PathBuf>,
     ) -> Self {
         let bookmarks = bookmarks_file
             .as_ref()
@@ -205,37 +306,19 @@ impl BrowserState {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .map(|raw| CookieJar::deserialize_tsv(&raw))
             .unwrap_or_default();
+        cookies.prune_expired();
 
-        let shield_enabled = true;
-        let mut temiz_url = normalize_address(initial_address);
-        if shield_enabled {
-            let (cleaned, _) = anka_net::shield::strip_tracking_params(&temiz_url);
-            temiz_url = cleaned;
-        }
-        let init_cookie_hdr = Url::parse(&temiz_url)
-            .ok()
-            .and_then(|u| cookies.cookie_header_for(&u));
+        let history_entries = history_file
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|raw| deserialize_history(&raw))
+            .unwrap_or_default();
 
-        let mut worker = TabWorkerClient::new(!cfg!(test));
-        let ilk_sayfa = worker.load_url(
-            initial_address,
-            viewport_width,
-            shield_enabled,
-            init_cookie_hdr.as_deref(),
-        );
-        if !ilk_sayfa.set_cookies.is_empty()
-            && let Ok(parsed) = Url::parse(&temiz_url)
-        {
-            for line in &ilk_sayfa.set_cookies {
-                cookies.store_header_line(&parsed, line);
-            }
-        }
-
-        let state = Self {
+        let mut state = Self {
             tabs: vec![TabState {
-                current_url: temiz_url,
-                page: ilk_sayfa,
-                worker,
+                current_url: String::new(),
+                page: RenderSnapshot::empty(),
+                worker: TabWorkerClient::new(!cfg!(test)),
                 history: Vec::new(),
                 forward_history: Vec::new(),
                 scroll_y: 0,
@@ -244,13 +327,16 @@ impl BrowserState {
             }],
             active_tab: 0,
             bookmarks,
+            history_entries,
             viewport_width,
-            shield_enabled,
+            shield_enabled: true,
             cookies,
             bookmarks_file,
             cookies_file,
+            history_file,
         };
         state.persist_cookies();
+        state.open_request(initial_address, None, false);
         state
     }
 
@@ -273,6 +359,49 @@ impl BrowserState {
     fn persist_cookies(&self) {
         let content = self.cookies.serialize_tsv();
         Self::write_config_file(&self.cookies_file, &content);
+    }
+
+    /// Ziyaret geçmişini diskteki `history.tsv` dosyasına kalıcı olarak yazar.
+    fn persist_history(&self) {
+        let content = serialize_history(&self.history_entries);
+        Self::write_config_file(&self.history_file, &content);
+    }
+
+    fn record_history_visit(&mut self, url: &str, title: Option<&str>) {
+        if url.is_empty()
+            || url.starts_with("view-source:")
+            || url.starts_with("http://anka.local/gecmis")
+            || url == "http://anka.local/cerez-temizle"
+            || url == "http://anka.local/cokme-testi"
+        {
+            return;
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let entry_title = title
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .unwrap_or(url)
+            .to_string();
+        self.history_entries.retain(|h| h.url != url);
+        self.history_entries.insert(
+            0,
+            HistoryEntry {
+                title: entry_title,
+                url: url.to_string(),
+                visited_epoch: now,
+            },
+        );
+        self.history_entries.truncate(MAX_HISTORY_ENTRIES);
+        self.persist_history();
+    }
+
+    /// Tüm gezinme geçmişini bellekten ve diskten temizler.
+    pub fn clear_history(&mut self) {
+        self.history_entries.clear();
+        self.persist_history();
     }
 
     /// Tüm çerezleri bellekten ve diskten temizler.
@@ -299,6 +428,42 @@ impl BrowserState {
 
     pub fn focused_input(&self) -> Option<&str> {
         self.active().focused_input.as_deref()
+    }
+
+    pub fn focused_is_multiline(&self) -> bool {
+        let Some(focused) = self.focused_input() else {
+            return false;
+        };
+        self.active()
+            .page
+            .display_list
+            .iter()
+            .any(|k| k.input_name.as_deref() == Some(focused) && k.is_multiline)
+    }
+
+    /// Çok satırlı `<textarea>` metnini `\n` ve maksimum satır genişliğine göre satırlara böler.
+    pub fn wrap_display_lines(text: &str, max_chars: usize) -> Vec<String> {
+        let cap = max_chars.max(8);
+        let mut lines = Vec::new();
+        for raw_line in text.split('\n') {
+            if raw_line.is_empty() {
+                lines.push(String::new());
+                continue;
+            }
+            let mut cur = String::new();
+            let mut count = 0usize;
+            for ch in raw_line.chars() {
+                if count >= cap {
+                    lines.push(cur);
+                    cur = String::new();
+                    count = 0;
+                }
+                cur.push(ch);
+                count += 1;
+            }
+            lines.push(cur);
+        }
+        lines
     }
 
     /// Bir `<input>` kutusunun ekranda gösterilecek canlı değerini döndürür.
@@ -339,8 +504,8 @@ impl BrowserState {
     pub fn window_title(&self) -> String {
         let tab_info = format!("[Sekme {}/{}]", self.active_tab + 1, self.tabs.len());
         match &self.active().page.page_title {
-            Some(t) => format!("{t} {tab_info} — Anka Browser v0.3.2"),
-            None => format!("Anka Browser v0.3.2 {tab_info} — Telek Engine"),
+            Some(t) => format!("{t} {tab_info} — Anka Browser v0.3.3"),
+            None => format!("Anka Browser v0.3.3 {tab_info} — Telek Engine"),
         }
     }
 
@@ -401,24 +566,10 @@ impl BrowserState {
     }
 
     pub fn new_tab(&mut self, initial_address: &str) -> usize {
-        let mut clean_url = normalize_address(initial_address);
-        if self.shield_enabled {
-            let (cleaned, _) = anka_net::shield::strip_tracking_params(&clean_url);
-            clean_url = cleaned;
-        }
-        let cookie_hdr = self.cookie_header_for_str(&clean_url);
-        let mut worker = TabWorkerClient::new(!cfg!(test));
-        let sayfa = worker.load_url(
-            initial_address,
-            self.viewport_width,
-            self.shield_enabled,
-            cookie_hdr.as_deref(),
-        );
-        self.record_snapshot_cookies(&clean_url, &sayfa.set_cookies);
         self.tabs.push(TabState {
-            current_url: clean_url,
-            page: sayfa,
-            worker,
+            current_url: String::new(),
+            page: RenderSnapshot::empty(),
+            worker: TabWorkerClient::new(!cfg!(test)),
             history: Vec::new(),
             forward_history: Vec::new(),
             scroll_y: 0,
@@ -426,6 +577,7 @@ impl BrowserState {
             input_values: HashMap::new(),
         });
         self.active_tab = self.tabs.len() - 1;
+        self.open_request(initial_address, None, false);
         self.active_tab
     }
 
@@ -521,6 +673,67 @@ impl BrowserState {
             ),
             self.bookmarks.len(),
             html_items
+        )
+    }
+
+    fn build_history_http_response(&self, filter_query: &str) -> String {
+        let needle = filter_query.trim().to_lowercase();
+        let mut items_html = String::new();
+        let mut matched_count = 0usize;
+
+        for entry in &self.history_entries {
+            if !needle.is_empty()
+                && !entry.title.to_lowercase().contains(&needle)
+                && !entry.url.to_lowercase().contains(&needle)
+            {
+                continue;
+            }
+            matched_count += 1;
+            let safe_title = html_escape(&entry.title);
+            let safe_url = html_escape(&entry.url);
+            let when = format_epoch_utc(entry.visited_epoch);
+            items_html.push_str(&format!(
+                "<div class=\"kart\"><p>{matched_count}. {safe_title} ({when})</p><a class=\"pill\" href=\"{safe_url}\">{safe_url}</a></div>"
+            ));
+        }
+
+        if items_html.is_empty() {
+            items_html = if needle.is_empty() {
+                "<div id=\"duyuru\"><p>Henuz hic gezinme gecmisi kaydi yok.</p></div>".to_string()
+            } else {
+                format!(
+                    "<div id=\"duyuru\"><p>\"{}\" aramasiyla eslesen kayit bulunamadi.</p></div>",
+                    html_escape(filter_query)
+                )
+            };
+        }
+
+        let safe_filter = html_escape(filter_query);
+        format!(
+            concat!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n",
+                "<html><head><title>Gezinme Gecmisi</title><style>",
+                "h1 {{ color: #1e3a8a; background-color: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; padding: 8px; font-size: 26px; }}",
+                "p {{ color: #1e293b; font-size: 15px; }}",
+                ".pill {{ color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; border-radius: 6px; font-size: 14px; }}",
+                ".cikis {{ color: #ffffff; background-color: #dc2626; border: 1px solid #b91c1c; border-radius: 6px; font-size: 14px; }}",
+                ".kart {{ color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 8px; font-size: 15px; }}",
+                "#duyuru {{ color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; border-radius: 8px; padding: 8px; font-size: 15px; }}",
+                "</style></head><body>",
+                "<h1>Anka Tarayici Gecmisi ({} Kayit)</h1>",
+                "<nav>",
+                "<a class=\"pill\" href=\"http://anka.local/hosgeldiniz\">Ana Sayfa</a>",
+                "<a class=\"pill\" href=\"http://anka.local/gecmis\">Tum Gecmis</a>",
+                "<a class=\"cikis\" href=\"http://anka.local/gecmis-temizle\">Gecmisi Temizle</a>",
+                "</nav>",
+                "<form action=\"http://anka.local/gecmis\">",
+                "<input type=\"text\" name=\"q\" value=\"{}\" placeholder=\"Gecmiste baslik veya adres ara...\">",
+                "<input type=\"submit\" value=\"Gecmiste Ara\">",
+                "</form>",
+                "{}",
+                "</body></html>"
+            ),
+            matched_count, safe_filter, items_html
         )
     }
 
@@ -627,6 +840,8 @@ impl BrowserState {
 
         if clean_url == "http://anka.local/cerez-temizle" {
             self.clear_cookies();
+        } else if clean_url == "http://anka.local/gecmis-temizle" {
+            self.clear_history();
         }
 
         let viewport_w = self.viewport_width;
@@ -645,6 +860,31 @@ impl BrowserState {
             self.active_mut()
                 .worker
                 .load_html(&clean_url, &raw_http, viewport_w, shield_on)
+        } else if clean_url == "http://anka.local/gecmis"
+            || clean_url.starts_with("http://anka.local/gecmis?")
+        {
+            let query_str = clean_url.split_once('?').map(|(_, q)| q).unwrap_or("");
+            let filter_q = extract_form_field(query_str, "q");
+            let raw_http = self.build_history_http_response(&filter_q);
+            self.active_mut()
+                .worker
+                .load_html(&clean_url, &raw_http, viewport_w, shield_on)
+        } else if clean_url == "http://anka.local/gecmis-temizle" {
+            let raw_http = concat!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n",
+                "<html><head><title>Gecmis Temizlendi</title><style>",
+                "h1 { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 8px; }",
+                ".pill { color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; border-radius: 6px; font-size: 15px; }",
+                "</style></head><body>",
+                "<h1>Tum Gezinme Gecmisi Temizlendi!</h1>",
+                "<p>history.tsv dosyasi sifirlandi.</p>",
+                "<nav><a class=\"pill\" href=\"http://anka.local/gecmis\">Gecmis Sayfasina Don</a>",
+                "<a class=\"pill\" href=\"http://anka.local/hosgeldiniz\">Ana Sayfa</a></nav>",
+                "</body></html>"
+            );
+            self.active_mut()
+                .worker
+                .load_html(&clean_url, raw_http, viewport_w, shield_on)
         } else if clean_url == "http://anka.local/gelistirici" {
             let inspected_url = if current_url_before.is_empty() {
                 clean_url.clone()
@@ -681,13 +921,21 @@ impl BrowserState {
         };
 
         self.record_snapshot_cookies(&clean_url, &loaded.set_cookies);
+        let loaded_title = loaded.page_title.clone();
+        let loaded_crashed = loaded.crashed;
 
-        let tab = self.active_mut();
-        tab.current_url = clean_url;
-        tab.page = loaded;
-        tab.scroll_y = 0;
-        tab.focused_input = None;
-        tab.input_values.clear();
+        {
+            let tab = self.active_mut();
+            tab.current_url = clean_url.clone();
+            tab.page = loaded;
+            tab.scroll_y = 0;
+            tab.focused_input = None;
+            tab.input_values.clear();
+        }
+
+        if !loaded_crashed {
+            self.record_history_visit(&clean_url, loaded_title.as_deref());
+        }
     }
 
     pub fn navigate(&mut self, raw_address: &str, push_history: bool) {
@@ -1347,7 +1595,7 @@ mod tests {
             state
                 .display_list()
                 .iter()
-                .any(|b| b.text.contains("Anka JS v0.3.2 baslatildi"))
+                .any(|b| b.text.contains("Anka JS v0.3.3 baslatildi"))
         );
 
         // view-source: sayfanin ham HTML kaynağını satır numaralarıyla göstermeli:
@@ -1364,5 +1612,125 @@ mod tests {
                 .iter()
                 .any(|b| b.text.contains("<html>"))
         );
+    }
+
+    #[test]
+    fn test_kalici_gecmis_kaydi_arama_ve_temizleme() {
+        let history_path = std::env::temp_dir().join("anka_test_history_v033.tsv");
+        let _ = std::fs::remove_file(&history_path);
+
+        {
+            let mut state = BrowserState::with_all_storage_paths(
+                "http://anka.local/hosgeldiniz",
+                860,
+                None,
+                None,
+                Some(history_path.clone()),
+            );
+            state.navigate("http://anka.local/oturum", true);
+            state.navigate("http://anka.local/kalkan", true);
+            assert!(state.history_entries.len() >= 3);
+            assert_eq!(state.history_entries[0].url, "http://anka.local/kalkan");
+        }
+
+        let mut reopened = BrowserState::with_all_storage_paths(
+            "http://anka.local/gecmis?q=Kalkan",
+            860,
+            None,
+            None,
+            Some(history_path.clone()),
+        );
+        assert!(
+            reopened
+                .display_list()
+                .iter()
+                .any(|b| b.text.contains("Anka Kalkan Testi"))
+        );
+        assert!(
+            !reopened
+                .display_list()
+                .iter()
+                .any(|b| b.text.contains("Oturum Testi"))
+        );
+
+        reopened.navigate("http://anka.local/gecmis-temizle", true);
+        assert!(reopened.history_entries.is_empty());
+        let _ = std::fs::remove_file(&history_path);
+    }
+
+    #[test]
+    fn test_textarea_satir_sonu_ve_addeventlistener() {
+        let mut state = BrowserState::new("http://anka.local/hosgeldiniz", 860);
+
+        // Ana sayfadaki `Sifirla` dugmesi querySelector + addEventListener ile baglanmis olmali!
+        let artir_btn = state
+            .display_list()
+            .iter()
+            .find(|b| b.onclick.as_deref() == Some("artir()"))
+            .unwrap()
+            .clone();
+        assert_eq!(
+            state.click_at(artir_btn.x as i32 + 5, artir_btn.y as i32 + 5),
+            ClickAction::Redraw
+        );
+        assert!(
+            state
+                .display_list()
+                .iter()
+                .any(|b| b.text.contains("Tiklama Sayisi: 1"))
+        );
+
+        let sifirla_btn = state
+            .display_list()
+            .iter()
+            .find(|b| b.text.contains("Sifirla"))
+            .expect("Sifirla dugmesi")
+            .clone();
+        assert_eq!(sifirla_btn.onclick.as_deref(), Some("sifirla()"));
+        assert_eq!(
+            state.click_at(sifirla_btn.x as i32 + 5, sifirla_btn.y as i32 + 5),
+            ClickAction::Redraw
+        );
+        assert!(
+            state
+                .display_list()
+                .iter()
+                .any(|b| b.text.contains("Sayac Sifirlandi: 0"))
+        );
+
+        // Not Defteri (`<textarea>` + POST):
+        state.navigate("http://anka.local/not", true);
+        let area = state
+            .display_list()
+            .iter()
+            .find(|b| b.tag == "textarea")
+            .expect("textarea kutusu")
+            .clone();
+        assert!(area.is_multiline);
+        assert_eq!(
+            state.click_at(area.x as i32 + 8, area.y as i32 + 8),
+            ClickAction::Redraw
+        );
+        assert!(state.focused_is_multiline());
+        for ch in "Ilk\nIkinci".chars() {
+            assert!(state.type_char(ch));
+        }
+
+        let lines = BrowserState::wrap_display_lines(state.input_value("icerik").unwrap(), 30);
+        assert_eq!(lines, vec!["Ilk".to_string(), "Ikinci".to_string()]);
+
+        let submit_btn = state
+            .display_list()
+            .iter()
+            .find(|b| b.is_submit)
+            .expect("Notu Gonder dugmesi")
+            .clone();
+        let action = state.click_at(submit_btn.x as i32 + 8, submit_btn.y as i32 + 5);
+        assert!(matches!(action, ClickAction::SubmitPost { .. }));
+        if let ClickAction::SubmitPost { url, body } = action {
+            state.submit_post(&url, &body, true);
+        }
+        assert!(state.display_list().iter().any(|b| b.text == "Ilk"));
+        assert!(state.display_list().iter().any(|b| b.text == "Ikinci"));
     }
 }

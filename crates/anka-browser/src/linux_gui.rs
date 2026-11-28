@@ -610,8 +610,12 @@ unsafe extern "C" fn on_canvas_key_press(
         } else if keyval == GDK_KEY_BACKSPACE {
             handled = app.state.backspace_input();
         } else if keyval == GDK_KEY_RETURN || keyval == GDK_KEY_KP_ENTER {
-            submit_action = app.state.submit_focused_form();
-            handled = true;
+            if app.state.focused_is_multiline() {
+                handled = app.state.type_char('\n');
+            } else {
+                submit_action = app.state.submit_focused_form();
+                handled = true;
+            }
         } else {
             let uni = unsafe { (api.gdk_keyval_to_unicode)(keyval) };
             if let Some(ch) = char::from_u32(uni)
@@ -688,6 +692,11 @@ unsafe extern "C" fn on_window_key_press(
                 (api.gtk_widget_queue_draw)(app.canvas as *mut GtkWidget);
             }
         }
+        return 1;
+    }
+
+    if ctrl && matches!(keyval, 0x0068 | 0x0048) {
+        adres_yukle("http://anka.local/gecmis", true);
         return 1;
     }
 
@@ -962,7 +971,14 @@ unsafe extern "C" fn on_canvas_draw(
                     );
 
                     let pad = komut.padding as c_double;
-                    let c_text = to_cstr(&render_text);
+                    let lines: Vec<String> = if komut.is_multiline {
+                        let max_chars = ((box_w - pad * 2.0).max(40.0) as usize) / 8;
+                        BrowserState::wrap_display_lines(&render_text, max_chars)
+                    } else {
+                        vec![render_text]
+                    };
+                    let line_step = (komut.font_size as c_double + 5.0).max(18.0);
+                    let max_bottom = draw_y - 2.0 + box_h - (komut.font_size as c_double) * 0.4;
 
                     if let Some(pango) = &api.pango {
                         let font_desc_c = match (is_code, is_bold, is_italic) {
@@ -983,32 +999,50 @@ unsafe extern "C" fn on_canvas_draw(
                                 );
                                 (pango.pango_layout_set_font_description)(layout, desc);
                             }
-                            (pango.pango_layout_set_text)(layout, c_text.as_ptr(), -1);
 
-                            let mut tw: c_int = 0;
-                            let mut th: c_int = 0;
-                            (pango.pango_layout_get_pixel_size)(layout, &mut tw, &mut th);
+                            for (idx, line_str) in lines.iter().enumerate() {
+                                let top_y = draw_y + pad + 2.0 + (idx as c_double) * line_step;
+                                if komut.is_multiline && top_y > max_bottom {
+                                    break;
+                                }
+                                if line_str.is_empty() {
+                                    continue;
+                                }
+                                let c_line = to_cstr(line_str);
+                                (pango.pango_layout_set_text)(layout, c_line.as_ptr(), -1);
 
-                            let real_w = (tw as c_double)
-                                .min((box_w - pad * 2.0).max(0.0))
-                                .max(0.0);
-                            let text_x = match komut.text_align.as_str() {
-                                "center" => (draw_x - 4.0) + ((box_w - real_w) / 2.0).max(pad),
-                                "right" => (draw_x - 4.0) + (box_w - real_w - pad).max(pad),
-                                _ => draw_x + 4.0 + pad,
-                            };
+                                let mut tw: c_int = 0;
+                                let mut th: c_int = 0;
+                                (pango.pango_layout_get_pixel_size)(layout, &mut tw, &mut th);
 
-                            let top_y = draw_y + pad + 2.0;
-                            (api.cairo_move_to)(cr, text_x, top_y);
-                            (pango.pango_cairo_show_layout)(cr, layout);
+                                let real_w = (tw as c_double)
+                                    .min((box_w - pad * 2.0).max(0.0))
+                                    .max(0.0);
+                                let text_x = if komut.is_multiline {
+                                    draw_x + 4.0 + pad
+                                } else {
+                                    match komut.text_align.as_str() {
+                                        "center" => {
+                                            (draw_x - 4.0) + ((box_w - real_w) / 2.0).max(pad)
+                                        }
+                                        "right" => {
+                                            (draw_x - 4.0) + (box_w - real_w - pad).max(pad)
+                                        }
+                                        _ => draw_x + 4.0 + pad,
+                                    }
+                                };
 
-                            if is_link_text {
-                                let underline_y = top_y
-                                    + (th as c_double).max(komut.font_size as c_double)
-                                    - 1.0;
-                                (api.cairo_set_line_width)(cr, 1.0);
-                                (api.cairo_rectangle)(cr, text_x, underline_y, real_w, 1.0);
-                                (api.cairo_fill)(cr);
+                                (api.cairo_move_to)(cr, text_x, top_y);
+                                (pango.pango_cairo_show_layout)(cr, layout);
+
+                                if is_link_text && !komut.is_multiline {
+                                    let underline_y = top_y
+                                        + (th as c_double).max(komut.font_size as c_double)
+                                        - 1.0;
+                                    (api.cairo_set_line_width)(cr, 1.0);
+                                    (api.cairo_rectangle)(cr, text_x, underline_y, real_w, 1.0);
+                                    (api.cairo_fill)(cr);
+                                }
                             }
                         }
                         if !desc.is_null() {
@@ -1037,25 +1071,45 @@ unsafe extern "C" fn on_canvas_draw(
                         );
                         (api.cairo_set_font_size)(cr, komut.font_size as c_double);
 
-                        let approx_text_w = ((render_text.chars().count() as c_double)
-                            * (komut.font_size as c_double * 0.56))
-                            .min(box_w - pad * 2.0)
-                            .max(0.0);
+                        for (idx, line_str) in lines.iter().enumerate() {
+                            let baseline_y = draw_y
+                                + pad
+                                + (komut.font_size as c_double)
+                                + (idx as c_double) * line_step;
+                            if komut.is_multiline && baseline_y > max_bottom + (komut.font_size as c_double) * 0.4 {
+                                break;
+                            }
+                            if line_str.is_empty() {
+                                continue;
+                            }
+                            let c_line = to_cstr(line_str);
+                            let approx_text_w = ((line_str.chars().count() as c_double)
+                                * (komut.font_size as c_double * 0.56))
+                                .min(box_w - pad * 2.0)
+                                .max(0.0);
 
-                        let text_x = match komut.text_align.as_str() {
-                            "center" => (draw_x - 4.0) + ((box_w - approx_text_w) / 2.0).max(pad),
-                            "right" => (draw_x - 4.0) + (box_w - approx_text_w - pad).max(pad),
-                            _ => draw_x + 4.0 + pad,
-                        };
+                            let text_x = if komut.is_multiline {
+                                draw_x + 4.0 + pad
+                            } else {
+                                match komut.text_align.as_str() {
+                                    "center" => {
+                                        (draw_x - 4.0) + ((box_w - approx_text_w) / 2.0).max(pad)
+                                    }
+                                    "right" => {
+                                        (draw_x - 4.0) + (box_w - approx_text_w - pad).max(pad)
+                                    }
+                                    _ => draw_x + 4.0 + pad,
+                                }
+                            };
 
-                        let baseline_y = draw_y + pad + (komut.font_size as c_double);
-                        (api.cairo_move_to)(cr, text_x, baseline_y);
-                        (api.cairo_show_text)(cr, c_text.as_ptr());
+                            (api.cairo_move_to)(cr, text_x, baseline_y);
+                            (api.cairo_show_text)(cr, c_line.as_ptr());
 
-                        if is_link_text {
-                            (api.cairo_set_line_width)(cr, 1.0);
-                            (api.cairo_rectangle)(cr, text_x, baseline_y + 2.0, approx_text_w, 1.0);
-                            (api.cairo_fill)(cr);
+                            if is_link_text && !komut.is_multiline {
+                                (api.cairo_set_line_width)(cr, 1.0);
+                                (api.cairo_rectangle)(cr, text_x, baseline_y + 2.0, approx_text_w, 1.0);
+                                (api.cairo_fill)(cr);
+                            }
                         }
                     }
                 }
