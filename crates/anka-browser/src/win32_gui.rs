@@ -37,6 +37,7 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_SIZE: u32 = 0x0005;
 const WM_PAINT: u32 = 0x000F;
 const WM_COMMAND: u32 = 0x0111;
+const EN_CHANGE: usize = 0x0300;
 const WM_SETFONT: u32 = 0x0030;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_CHAR: u32 = 0x0102;
@@ -50,7 +51,12 @@ const VK_RETURN: usize = 0x0D;
 const VK_SHIFT: i32 = 0x10;
 const VK_CONTROL: i32 = 0x11;
 const VK_ESCAPE: usize = 0x1B;
+const VK_NUMPAD0: usize = 0x60;
+const VK_ADD: usize = 0x6B;
+const VK_SUBTRACT: usize = 0x6D;
 const VK_F5: usize = 0x74;
+const VK_OEM_PLUS: usize = 0xBB;
+const VK_OEM_MINUS: usize = 0xBD;
 const PS_SOLID: i32 = 0;
 const NULL_BRUSH: i32 = 5;
 const NULL_PEN: i32 = 8;
@@ -79,10 +85,15 @@ const ID_BTN_CLOSE_TAB: usize = 110;
 const ID_BTN_BOOKMARK_TOGGLE: usize = 111;
 const ID_BTN_BOOKMARKS_PAGE: usize = 112;
 const ID_BTN_SHIELD: usize = 113;
+const ID_FIND_EDIT: usize = 114;
+const ID_BTN_FIND_PREV: usize = 115;
+const ID_BTN_FIND_NEXT: usize = 116;
+const ID_BTN_FIND_CLOSE: usize = 117;
 const ID_BTN_TAB_BASE: usize = 200;
 const MAX_TAB_SLOTS: usize = 5;
 
 const TOOLBAR_HEIGHT: i32 = 84;
+const FIND_BAR_HEIGHT: i32 = 34;
 const STATUS_HEIGHT: i32 = 28;
 
 #[repr(C)]
@@ -260,6 +271,12 @@ struct PencereDurumu {
     btn_shield: usize,
     url_edit: usize,
     btn_go: usize,
+    find_label: usize,
+    find_edit: usize,
+    btn_find_prev: usize,
+    btn_find_next: usize,
+    find_info_label: usize,
+    btn_find_close: usize,
     state: BrowserState,
 }
 
@@ -267,6 +284,24 @@ static DURUM: Mutex<Option<PencereDurumu>> = Mutex::new(None);
 
 fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+fn read_window_text(hwnd: HWND) -> String {
+    let mut buf = [0u16; 512];
+    let len = unsafe { GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    String::from_utf16_lossy(&buf[..len.max(0) as usize])
+}
+
+fn top_canvas_offset(state: &BrowserState) -> i32 {
+    if state.is_find_open() {
+        TOOLBAR_HEIGHT + FIND_BAR_HEIGHT
+    } else {
+        TOOLBAR_HEIGHT
+    }
+}
+
+fn scale_px(val: i32, zoom_percent: u32) -> i32 {
+    (val * zoom_percent as i32) / 100
 }
 
 fn rgb(r: u8, g: u8, b: u8) -> u32 {
@@ -284,6 +319,8 @@ fn pencereyi_yenile(hwnd: HWND, st: &PencereDurumu) {
     };
     let wide_bm = to_wide(bm_label);
     let wide_shield = to_wide(&st.state.shield_button_label());
+    let wide_find_info = to_wide(&st.state.find_status_text());
+    let find_show = if st.state.is_find_open() { 5 } else { 0 };
 
     unsafe {
         SetWindowTextW(url_edit, wide_url.as_ptr());
@@ -293,6 +330,28 @@ fn pencereyi_yenile(hwnd: HWND, st: &PencereDurumu) {
         }
         if st.btn_shield != 0 {
             SetWindowTextW(st.btn_shield as HWND, wide_shield.as_ptr());
+        }
+        if st.find_info_label != 0 {
+            SetWindowTextW(st.find_info_label as HWND, wide_find_info.as_ptr());
+        }
+        if st.find_edit != 0 && st.state.is_find_open() {
+            let edit_hwnd = st.find_edit as HWND;
+            if read_window_text(edit_hwnd) != st.state.find_query() {
+                let wide_q = to_wide(st.state.find_query());
+                SetWindowTextW(edit_hwnd, wide_q.as_ptr());
+            }
+        }
+        for &ptr in &[
+            st.find_label,
+            st.find_edit,
+            st.btn_find_prev,
+            st.btn_find_next,
+            st.find_info_label,
+            st.btn_find_close,
+        ] {
+            if ptr != 0 {
+                ShowWindow(ptr as HWND, find_show);
+            }
         }
         for (idx, &btn_ptr) in st.tab_buttons.iter().enumerate() {
             if btn_ptr != 0 {
@@ -616,6 +675,103 @@ unsafe extern "system" fn wnd_proc(
                 );
                 SendMessageW(btn_shield, WM_SETFONT, ui_font as WPARAM, 1);
 
+                // 3. SATIR: Sayfa İçi Arama Çubuğu (`Ctrl+F`, varsayılan gizli)
+                let find_label = CreateWindowExW(
+                    0,
+                    to_wide("STATIC").as_ptr(),
+                    to_wide("Ara (Ctrl+F):").as_ptr(),
+                    WS_CHILD,
+                    8,
+                    TOOLBAR_HEIGHT + 6,
+                    90,
+                    22,
+                    hwnd,
+                    null_mut(),
+                    hinst,
+                    null_mut(),
+                );
+                SendMessageW(find_label, WM_SETFONT, ui_font as WPARAM, 1);
+
+                let find_edit = CreateWindowExW(
+                    0,
+                    to_wide("EDIT").as_ptr(),
+                    to_wide("").as_ptr(),
+                    WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+                    102,
+                    TOOLBAR_HEIGHT + 3,
+                    500,
+                    26,
+                    hwnd,
+                    ID_FIND_EDIT as HMENU,
+                    hinst,
+                    null_mut(),
+                );
+                SendMessageW(find_edit, WM_SETFONT, ui_font as WPARAM, 1);
+
+                let btn_find_prev = CreateWindowExW(
+                    0,
+                    to_wide("BUTTON").as_ptr(),
+                    to_wide("< Onceki").as_ptr(),
+                    WS_CHILD | BS_PUSHBUTTON,
+                    608,
+                    TOOLBAR_HEIGHT + 3,
+                    70,
+                    26,
+                    hwnd,
+                    ID_BTN_FIND_PREV as HMENU,
+                    hinst,
+                    null_mut(),
+                );
+                SendMessageW(btn_find_prev, WM_SETFONT, ui_font as WPARAM, 1);
+
+                let btn_find_next = CreateWindowExW(
+                    0,
+                    to_wide("BUTTON").as_ptr(),
+                    to_wide("Sonraki >").as_ptr(),
+                    WS_CHILD | BS_PUSHBUTTON,
+                    682,
+                    TOOLBAR_HEIGHT + 3,
+                    74,
+                    26,
+                    hwnd,
+                    ID_BTN_FIND_NEXT as HMENU,
+                    hinst,
+                    null_mut(),
+                );
+                SendMessageW(btn_find_next, WM_SETFONT, ui_font as WPARAM, 1);
+
+                let find_info_label = CreateWindowExW(
+                    0,
+                    to_wide("STATIC").as_ptr(),
+                    to_wide("Aramak icin yazin").as_ptr(),
+                    WS_CHILD,
+                    762,
+                    TOOLBAR_HEIGHT + 6,
+                    92,
+                    22,
+                    hwnd,
+                    null_mut(),
+                    hinst,
+                    null_mut(),
+                );
+                SendMessageW(find_info_label, WM_SETFONT, ui_font as WPARAM, 1);
+
+                let btn_find_close = CreateWindowExW(
+                    0,
+                    to_wide("BUTTON").as_ptr(),
+                    to_wide("X Kapat").as_ptr(),
+                    WS_CHILD | BS_PUSHBUTTON,
+                    858,
+                    TOOLBAR_HEIGHT + 3,
+                    68,
+                    26,
+                    hwnd,
+                    ID_BTN_FIND_CLOSE as HMENU,
+                    hinst,
+                    null_mut(),
+                );
+                SendMessageW(btn_find_close, WM_SETFONT, ui_font as WPARAM, 1);
+
                 if let Ok(mut guard) = DURUM.lock()
                     && let Some(st) = guard.as_mut()
                 {
@@ -624,6 +780,12 @@ unsafe extern "system" fn wnd_proc(
                     st.btn_shield = btn_shield as usize;
                     st.url_edit = url_edit as usize;
                     st.btn_go = btn_go as usize;
+                    st.find_label = find_label as usize;
+                    st.find_edit = find_edit as usize;
+                    st.btn_find_prev = btn_find_prev as usize;
+                    st.btn_find_next = btn_find_next as usize;
+                    st.find_info_label = find_info_label as usize;
+                    st.btn_find_close = btn_find_close as usize;
                     pencereyi_yenile(hwnd, st);
                 }
             }
@@ -661,6 +823,49 @@ unsafe extern "system" fn wnd_proc(
                         42,
                         110,
                         28,
+                        1,
+                    );
+
+                    let find_edit_w = (width - 102 - 324).max(120);
+                    MoveWindow(st.find_label as HWND, 8, TOOLBAR_HEIGHT + 6, 90, 22, 1);
+                    MoveWindow(
+                        st.find_edit as HWND,
+                        102,
+                        TOOLBAR_HEIGHT + 3,
+                        find_edit_w,
+                        26,
+                        1,
+                    );
+                    MoveWindow(
+                        st.btn_find_prev as HWND,
+                        102 + find_edit_w + 6,
+                        TOOLBAR_HEIGHT + 3,
+                        70,
+                        26,
+                        1,
+                    );
+                    MoveWindow(
+                        st.btn_find_next as HWND,
+                        102 + find_edit_w + 80,
+                        TOOLBAR_HEIGHT + 3,
+                        74,
+                        26,
+                        1,
+                    );
+                    MoveWindow(
+                        st.find_info_label as HWND,
+                        102 + find_edit_w + 160,
+                        TOOLBAR_HEIGHT + 6,
+                        92,
+                        22,
+                        1,
+                    );
+                    MoveWindow(
+                        st.btn_find_close as HWND,
+                        102 + find_edit_w + 256,
+                        TOOLBAR_HEIGHT + 3,
+                        64,
+                        26,
                         1,
                     );
                 }
@@ -764,6 +969,51 @@ unsafe extern "system" fn wnd_proc(
                         pencereyi_yenile(hwnd, st);
                     }
                 }
+                ID_FIND_EDIT if ((wparam >> 16) & 0xFFFF) == EN_CHANGE => {
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                        && st.find_edit != 0
+                    {
+                        let q = read_window_text(st.find_edit as HWND);
+                        st.state.set_find_query(&q);
+                        if st.find_info_label != 0 {
+                            let info_w = to_wide(&st.state.find_status_text());
+                            unsafe {
+                                SetWindowTextW(st.find_info_label as HWND, info_w.as_ptr());
+                            }
+                        }
+                        unsafe {
+                            InvalidateRect(hwnd, null(), 1);
+                        }
+                    }
+                }
+                ID_BTN_FIND_PREV => {
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                    {
+                        st.state.find_next(true);
+                        pencereyi_yenile(hwnd, st);
+                    }
+                }
+                ID_BTN_FIND_NEXT => {
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                    {
+                        st.state.find_next(false);
+                        pencereyi_yenile(hwnd, st);
+                    }
+                }
+                ID_BTN_FIND_CLOSE => {
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                    {
+                        st.state.close_find();
+                        pencereyi_yenile(hwnd, st);
+                        unsafe {
+                            SetFocus(hwnd);
+                        }
+                    }
+                }
                 _ => {}
             }
             0
@@ -775,8 +1025,10 @@ unsafe extern "system" fn wnd_proc(
             let link_var_mi = {
                 let guard = DURUM.lock().ok();
                 guard.is_some_and(|g| {
-                    g.as_ref()
-                        .is_some_and(|st| st.state.is_interactive_at(mouse_x, mouse_y - TOOLBAR_HEIGHT))
+                    g.as_ref().is_some_and(|st| {
+                        let top_y = top_canvas_offset(&st.state);
+                        mouse_y >= top_y && st.state.is_interactive_at(mouse_x, mouse_y - top_y)
+                    })
                 })
             };
 
@@ -793,7 +1045,12 @@ unsafe extern "system" fn wnd_proc(
             let action = {
                 let mut guard = DURUM.lock().ok();
                 if let Some(st) = guard.as_mut().and_then(|g| g.as_mut()) {
-                    let act = st.state.click_at(click_x, click_y - TOOLBAR_HEIGHT);
+                    let top_y = top_canvas_offset(&st.state);
+                    let act = if click_y >= top_y {
+                        st.state.click_at(click_x, click_y - top_y)
+                    } else {
+                        ClickAction::None
+                    };
                     if st.state.focused_input().is_some() {
                         unsafe {
                             SetFocus(hwnd);
@@ -878,21 +1135,38 @@ unsafe extern "system" fn wnd_proc(
                 DeleteObject(toolbar_brush as HGDIOBJ);
 
                 // 2. Orta web sayfası tuvali (Sayfanın kendi `<body>` arka planı veya beyaz)
+                let (canvas_top, page_bg) = DURUM
+                    .lock()
+                    .ok()
+                    .and_then(|g| {
+                        g.as_ref()
+                            .map(|st| (top_canvas_offset(&st.state), st.state.page_bg()))
+                    })
+                    .unwrap_or((TOOLBAR_HEIGHT, None));
+
+                if canvas_top > TOOLBAR_HEIGHT {
+                    let find_rect = RECT {
+                        left: 0,
+                        top: TOOLBAR_HEIGHT,
+                        right: client.right,
+                        bottom: canvas_top,
+                    };
+                    let find_brush = CreateSolidBrush(rgb(226, 232, 240));
+                    FillRect(hdc, &find_rect, find_brush);
+                    DeleteObject(find_brush as HGDIOBJ);
+                }
+
                 let page_rect = RECT {
                     left: 0,
-                    top: TOOLBAR_HEIGHT,
+                    top: canvas_top,
                     right: client.right,
                     bottom: client.bottom - STATUS_HEIGHT,
                 };
-                let page_bg = DURUM
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.as_ref().and_then(|st| st.state.page_bg()))
-                    .unwrap_or(anka_paint::RgbColor {
-                        r: 255,
-                        g: 255,
-                        b: 255,
-                    });
+                let page_bg = page_bg.unwrap_or(anka_paint::RgbColor {
+                    r: 255,
+                    g: 255,
+                    b: 255,
+                });
                 let bg_brush = CreateSolidBrush(rgb(page_bg.r, page_bg.g, page_bg.b));
                 FillRect(hdc, &page_rect, bg_brush);
                 DeleteObject(bg_brush as HGDIOBJ);
@@ -917,17 +1191,21 @@ unsafe extern "system" fn wnd_proc(
                     let face = to_wide("Segoe UI");
                     let mono_face = to_wide("Consolas");
                     let scroll_y = st.state.scroll_y();
+                    let zoom = st.state.zoom_percent();
 
-                    for komut in st.state.display_list() {
-                        let weight = if matches!(
-                            komut.tag.as_str(),
-                            "h1" | "h2" | "h3" | "strong" | "b"
-                        ) {
+                    for (cmd_idx, komut) in st.state.display_list().iter().enumerate() {
+                        let weight = if komut.is_bold
+                            || matches!(
+                                komut.tag.as_str(),
+                                "h1" | "h2" | "h3" | "strong" | "b"
+                            )
+                        {
                             FW_BOLD
                         } else {
                             FW_NORMAL
                         };
-                        let italic = if matches!(komut.tag.as_str(), "em" | "i") {
+                        let italic = if komut.is_italic || matches!(komut.tag.as_str(), "em" | "i")
+                        {
                             1
                         } else {
                             0
@@ -949,8 +1227,9 @@ unsafe extern "system" fn wnd_proc(
                             face.as_ptr()
                         };
 
+                        let font_px = scale_px(komut.font_size as i32, zoom).max(6);
                         let font = CreateFontW(
-                            -(komut.font_size as i32),
+                            -font_px,
                             0,
                             0,
                             0,
@@ -969,26 +1248,60 @@ unsafe extern "system" fn wnd_proc(
 
                         SetTextColor(hdc, rgb(komut.color.r, komut.color.g, komut.color.b));
 
-                        let wide_text = to_wide(&komut.text);
-                        let draw_x = komut.x as i32 + 8;
-                        let draw_y = TOOLBAR_HEIGHT + komut.y as i32 - scroll_y;
+                        let draw_x = scale_px(komut.x as i32 + 8, zoom);
+                        let draw_y = canvas_top + scale_px(komut.y as i32 - scroll_y, zoom);
+                        let scaled_w = scale_px(komut.width as i32, zoom).max(1);
+                        let scaled_h = scale_px(komut.height as i32, zoom).max(1);
 
-                        if draw_y >= TOOLBAR_HEIGHT && draw_y < client.bottom - STATUS_HEIGHT - 12 {
+                        if draw_y >= canvas_top && draw_y < client.bottom - STATUS_HEIGHT - 12 {
+                            let pad_x = scale_px(4, zoom).max(2);
+                            let pad_y = scale_px(2, zoom).max(1);
                             let box_rect = RECT {
-                                left: draw_x - 4,
-                                top: draw_y - 2,
-                                right: (draw_x + komut.width as i32).min(client.right - 16),
-                                bottom: draw_y + komut.height as i32,
+                                left: draw_x - pad_x,
+                                top: draw_y - pad_y,
+                                right: (draw_x + scaled_w).min(client.right - 16),
+                                bottom: draw_y + scaled_h,
                             };
 
                             let rad_dia = if komut.border_radius > 0 {
                                 let max_d = (box_rect.right - box_rect.left)
                                     .min(box_rect.bottom - box_rect.top)
                                     .max(0);
-                                ((komut.border_radius as i32) * 2).min(max_d)
+                                (scale_px(komut.border_radius as i32, zoom) * 2).min(max_d)
                             } else {
                                 0
                             };
+
+                            // 0. Kutunun CSS `box-shadow` golgesi varsa arka plandan once sag-alt golge ciz!
+                            if komut.has_shadow {
+                                let sh_dx = scale_px(3, zoom).max(1);
+                                let sh_dy = scale_px(4, zoom).max(1);
+                                let shadow_rect = RECT {
+                                    left: box_rect.left + sh_dx,
+                                    top: box_rect.top + sh_dy,
+                                    right: box_rect.right + sh_dx,
+                                    bottom: box_rect.bottom + sh_dy,
+                                };
+                                let shadow_brush = CreateSolidBrush(rgb(203, 213, 225));
+                                if rad_dia > 0 {
+                                    let old_b = SelectObject(hdc, shadow_brush as HGDIOBJ);
+                                    let old_p = SelectObject(hdc, GetStockObject(NULL_PEN));
+                                    RoundRect(
+                                        hdc,
+                                        shadow_rect.left,
+                                        shadow_rect.top,
+                                        shadow_rect.right,
+                                        shadow_rect.bottom,
+                                        rad_dia,
+                                        rad_dia,
+                                    );
+                                    SelectObject(hdc, old_p);
+                                    SelectObject(hdc, old_b);
+                                } else {
+                                    FillRect(hdc, &shadow_rect, shadow_brush);
+                                }
+                                DeleteObject(shadow_brush as HGDIOBJ);
+                            }
 
                             // Eğer kutunun CSS arka plan rengi (`background-color`) varsa önce kutuyu boya!
                             if let Some(bg) = &komut.bg_color {
@@ -1096,7 +1409,49 @@ unsafe extern "system" fn wnd_proc(
                                 }
                             }
 
-                            let mut text_color = komut.color;
+                            // 3.5. `Ctrl+F` sayfa içi arama eşleşmesi vurgusu (aktif turuncu, diğerleri sarı)
+                            let match_kind = st.state.find_match_kind(cmd_idx);
+                            if let Some(is_active_match) = match_kind {
+                                let (hl_fill, hl_border, pen_w) = if is_active_match {
+                                    (rgb(253, 186, 116), rgb(234, 88, 12), 2)
+                                } else {
+                                    (rgb(254, 240, 138), rgb(234, 179, 8), 1)
+                                };
+                                let hl_brush = CreateSolidBrush(hl_fill);
+                                if rad_dia > 0 {
+                                    let pen = CreatePen(PS_SOLID, pen_w, hl_border);
+                                    let old_b = SelectObject(hdc, hl_brush as HGDIOBJ);
+                                    let old_p = SelectObject(hdc, pen);
+                                    RoundRect(
+                                        hdc,
+                                        box_rect.left,
+                                        box_rect.top,
+                                        box_rect.right,
+                                        box_rect.bottom,
+                                        rad_dia,
+                                        rad_dia,
+                                    );
+                                    SelectObject(hdc, old_p);
+                                    SelectObject(hdc, old_b);
+                                    DeleteObject(pen);
+                                } else {
+                                    FillRect(hdc, &box_rect, hl_brush);
+                                    let pen_brush = CreateSolidBrush(hl_border);
+                                    FrameRect(hdc, &box_rect, pen_brush);
+                                    DeleteObject(pen_brush as HGDIOBJ);
+                                }
+                                DeleteObject(hl_brush as HGDIOBJ);
+                            }
+
+                            let mut text_color = if match_kind.is_some() {
+                                anka_paint::RgbColor {
+                                    r: 15,
+                                    g: 23,
+                                    b: 42,
+                                }
+                            } else {
+                                komut.color
+                            };
                             let render_text: String = if let Some(input_name) = &komut.input_name {
                                 if let Some(typed) = st.state.input_value(input_name)
                                     && !typed.is_empty()
@@ -1127,18 +1482,22 @@ unsafe extern "system" fn wnd_proc(
 
                             if !gorsel_cizildi && !render_text.is_empty() {
                                 SetTextColor(hdc, rgb(text_color.r, text_color.g, text_color.b));
-                                let pad = komut.padding as i32;
+                                let pad = scale_px(komut.padding as i32, zoom);
                                 let box_w = (box_rect.right - box_rect.left).max(1);
                                 if komut.is_multiline {
-                                    let max_chars = ((box_w - pad * 2).max(40) as usize) / 8;
-                                    let line_step = (komut.font_size as i32 + 5).max(18);
-                                    let max_y = box_rect.bottom - (komut.font_size as i32);
+                                    let max_chars = ((box_w - pad * 2).max(40) as usize)
+                                        / scale_px(8, zoom).max(4) as usize;
+                                    let line_step =
+                                        scale_px((komut.font_size as i32 + 5).max(18), zoom)
+                                            .max(10);
+                                    let max_y = box_rect.bottom - font_px;
                                     for (idx, line) in
                                         BrowserState::wrap_display_lines(&render_text, max_chars)
                                             .iter()
                                             .enumerate()
                                     {
-                                        let line_y = draw_y + 2 + pad + (idx as i32) * line_step;
+                                        let line_y =
+                                            draw_y + pad_y + pad + (idx as i32) * line_step;
                                         if line_y > max_y {
                                             break;
                                         }
@@ -1148,7 +1507,7 @@ unsafe extern "system" fn wnd_proc(
                                         let wide_line = to_wide(line);
                                         TextOutW(
                                             hdc,
-                                            draw_x + 4 + pad,
+                                            draw_x + pad_x + pad,
                                             line_y,
                                             wide_line.as_ptr(),
                                             (wide_line.len() - 1) as i32,
@@ -1156,9 +1515,8 @@ unsafe extern "system" fn wnd_proc(
                                     }
                                 } else {
                                     let wide_render = to_wide(&render_text);
-                                    let approx_text_w = ((render_text.chars().count() as u32)
-                                        * (komut.font_size * 56 / 100))
-                                        as i32;
+                                    let approx_text_w = (render_text.chars().count() as i32)
+                                        * ((font_px * 56) / 100);
                                     let text_x = match komut.text_align.as_str() {
                                         "center" => {
                                             box_rect.left + ((box_w - approx_text_w) / 2).max(pad)
@@ -1166,12 +1524,12 @@ unsafe extern "system" fn wnd_proc(
                                         "right" => {
                                             box_rect.left + (box_w - approx_text_w - pad).max(pad)
                                         }
-                                        _ => draw_x + 4 + pad,
+                                        _ => draw_x + pad_x + pad,
                                     };
                                     TextOutW(
                                         hdc,
                                         text_x,
-                                        draw_y + 2 + pad,
+                                        draw_y + pad_y + pad,
                                         wide_render.as_ptr(),
                                         (wide_render.len() - 1) as i32,
                                     );
@@ -1241,6 +1599,12 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) {
             btn_shield: 0,
             url_edit: 0,
             btn_go: 0,
+            find_label: 0,
+            find_edit: 0,
+            btn_find_prev: 0,
+            btn_find_next: 0,
+            find_info_label: 0,
+            btn_find_close: 0,
             state,
         });
     }
@@ -1297,10 +1661,19 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) {
             if msg.message == WM_KEYDOWN {
                 let ctrl = (GetKeyState(VK_CONTROL) as u16 & 0x8000) != 0;
                 let shift = (GetKeyState(VK_SHIFT) as u16 & 0x8000) != 0;
-                let input_focused = DURUM
+                let (input_focused, find_open, find_edit_hwnd) = DURUM
                     .lock()
                     .ok()
-                    .is_some_and(|g| g.as_ref().is_some_and(|s| s.state.focused_input().is_some()));
+                    .and_then(|g| {
+                        g.as_ref().map(|s| {
+                            (
+                                s.state.focused_input().is_some(),
+                                s.state.is_find_open(),
+                                s.find_edit as HWND,
+                            )
+                        })
+                    })
+                    .unwrap_or((false, false, null_mut()));
 
                 if input_focused && msg.wParam == VK_TAB {
                     if let Ok(mut guard) = DURUM.lock()
@@ -1319,6 +1692,52 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) {
                         InvalidateRect(hwnd, null(), 1);
                         continue;
                     }
+                } else if find_open && msg.wParam == VK_ESCAPE {
+                    SendMessageW(hwnd, WM_COMMAND, ID_BTN_FIND_CLOSE, 0);
+                    continue;
+                } else if ctrl && msg.wParam == b'F' as usize {
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                    {
+                        st.state.open_find();
+                        pencereyi_yenile(hwnd, st);
+                        if st.find_edit != 0 {
+                            SetFocus(st.find_edit as HWND);
+                        }
+                    }
+                    continue;
+                } else if ctrl && matches!(msg.wParam, VK_OEM_PLUS | VK_ADD) {
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                    {
+                        st.state.zoom_in();
+                        pencereyi_yenile(hwnd, st);
+                    }
+                    continue;
+                } else if ctrl && matches!(msg.wParam, VK_OEM_MINUS | VK_SUBTRACT) {
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                    {
+                        st.state.zoom_out();
+                        pencereyi_yenile(hwnd, st);
+                    }
+                    continue;
+                } else if ctrl && (msg.wParam == b'0' as usize || msg.wParam == VK_NUMPAD0) {
+                    if let Ok(mut guard) = DURUM.lock()
+                        && let Some(st) = guard.as_mut()
+                    {
+                        st.state.zoom_reset();
+                        pencereyi_yenile(hwnd, st);
+                    }
+                    continue;
+                } else if msg.hwnd == find_edit_hwnd && msg.wParam == VK_RETURN {
+                    let cmd = if shift {
+                        ID_BTN_FIND_PREV
+                    } else {
+                        ID_BTN_FIND_NEXT
+                    };
+                    SendMessageW(hwnd, WM_COMMAND, cmd, 0);
+                    continue;
                 } else if msg.wParam == VK_F5 || (ctrl && msg.wParam == b'R' as usize) {
                     SendMessageW(hwnd, WM_COMMAND, ID_BTN_RELOAD, 0);
                     continue;

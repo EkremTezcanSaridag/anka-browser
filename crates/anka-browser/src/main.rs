@@ -125,7 +125,7 @@ impl LoadedPage {
         };
 
         self.status_message = format!(
-            "{} {} | {} bayt | {} kutu | Telek Engine v0.3.3{}{}",
+            "{} {} | {} bayt | {} kutu | Telek Engine v0.3.4{}{}",
             protokol_etiketi,
             self.status_code,
             self.body_len,
@@ -640,18 +640,18 @@ fn dahili_anka_local_http(
             "HTTP/1.1 200 OK\r\n",
             "Content-Type: text/html\r\n\r\n",
             "<html><head><title>Ana Sayfa</title><style>",
-            "h1 { color: #dc2626; background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; font-size: 30px; padding: 6px; text-align: center; }",
+            "h1 { color: #dc2626; background-color: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); font-size: 30px; padding: 6px; text-align: center; }",
             "h2 { color: #1d4ed8; font-size: 20px; }",
             "p  { color: #334155; font-size: 16px; }",
             "li { color: #0f766e; font-size: 16px; }",
-            ".pill { color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; border-radius: 6px; font-size: 15px; }",
-            ".jsbtn { color: #ffffff; background-color: #16a34a; border: 1px solid #15803d; border-radius: 6px; font-size: 15px; }",
-            ".jsreset { color: #ffffff; background-color: #dc2626; border: 1px solid #b91c1c; border-radius: 6px; font-size: 15px; }",
+            ".pill { color: #1e40af; background-color: #dbeafe; border: 1px solid #93c5fd; border-radius: 6px; font-weight: bold; font-size: 15px; }",
+            ".jsbtn { color: #ffffff; background-color: #16a34a; border: 1px solid #15803d; border-radius: 6px; font-weight: bold; font-size: 15px; }",
+            ".jsreset { color: #ffffff; background-color: #dc2626; border: 1px solid #b91c1c; border-radius: 6px; font-weight: bold; font-size: 15px; }",
             ".satir { display: flex; gap: 14px; }",
-            ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; padding: 10px; font-size: 15px; }",
-            "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; border-radius: 8px; padding: 10px; font-size: 15px; }",
+            ".kart { color: #065f46; background-color: #ecfdf5; border: 1px solid #6ee7b7; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); padding: 10px; font-size: 15px; }",
+            "#duyuru { color: #9a3412; background-color: #ffedd5; border: 1px solid #fdba74; border-radius: 8px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); font-style: italic; padding: 10px; font-size: 15px; }",
             "</style></head><body>",
-            "<h1>Anka Browser v0.3.3 — Kalici Gecmis, Textarea, querySelector &amp; addEventListener!</h1>",
+            "<h1>Anka Browser v0.3.4 — Yakinlastirma, Ctrl+F Arama &amp; CSS Box-Shadow!</h1>",
             "<nav>",
             "<a class=\"pill\" href=\"https://example.com\">HTTPS Example.com</a>",
             "<a class=\"pill\" href=\"http://info.cern.ch\">CERN (1991)</a>",
@@ -682,7 +682,7 @@ fn dahili_anka_local_http(
             "<script>",
             "let tiklama = 0;",
             "document.getElementById(\"js_sayac\").innerText = \"Anka JS Hazir! Tiklama Sayisi: 0\";",
-            "console.log(\"Anka JS v0.3.3 baslatildi!\");",
+            "console.log(\"Anka JS v0.3.4 baslatildi!\");",
             "function artir() {",
             "  tiklama++;",
             "  document.getElementById(\"js_sayac\").innerText = \"Tiklama Sayisi: \" + tiklama;",
@@ -893,7 +893,7 @@ fn main() {
     // Ekransız (Headless / `--headless` / CI) ortamda terminal önizlemesi çalışır
     let sayfa = motoru_calistir(&baslangic_adresi, 860);
     println!(
-        "Anka Browser v0.3.3 ({}) [{}] | page_bg={:?} -> {}",
+        "Anka Browser v0.3.4 ({}) [{}] | page_bg={:?} -> {}",
         baslangic_adresi,
         sayfa.page_title.as_deref().unwrap_or("Adsız"),
         sayfa.page_bg,

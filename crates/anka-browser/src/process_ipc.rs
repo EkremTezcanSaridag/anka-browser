@@ -193,7 +193,7 @@ pub fn serialize_snapshot(snap: &RenderSnapshot) -> String {
             ("0".to_string(), String::new())
         };
         out.push_str(&format!(
-            "CMD\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "CMD\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             cmd.x,
             cmd.y,
             cmd.width,
@@ -217,7 +217,10 @@ pub fn serialize_snapshot(snap: &RenderSnapshot) -> String {
             u8::from(cmd.is_password),
             u8::from(cmd.is_post_form),
             cmd.border_radius,
-            u8::from(cmd.is_multiline)
+            u8::from(cmd.is_multiline),
+            u8::from(cmd.has_shadow),
+            u8::from(cmd.is_bold),
+            u8::from(cmd.is_italic)
         ));
     }
     for cookie in &snap.set_cookies {
@@ -268,7 +271,7 @@ pub fn deserialize_snapshot<R: BufRead>(reader: &mut R) -> Result<RenderSnapshot
             return Err("Alt surec veri aktarimi sirasinda sonlandi".to_string());
         }
         let p: Vec<&str> = line.trim_end_matches(['\r', '\n']).split('\t').collect();
-        if p.len() != 25 || p[0] != "CMD" {
+        if p.len() != 28 || p[0] != "CMD" {
             return Err("Bozuk IPC CMD satiri".to_string());
         }
 
@@ -314,6 +317,9 @@ pub fn deserialize_snapshot<R: BufRead>(reader: &mut R) -> Result<RenderSnapshot
             is_post_form: p[22] == "1",
             border_radius: p[23].parse().unwrap_or(0),
             is_multiline: p[24] == "1",
+            has_shadow: p[25] == "1",
+            is_bold: p[26] == "1",
+            is_italic: p[27] == "1",
         });
     }
 
@@ -753,7 +759,19 @@ mod tests {
             decoded
                 .display_list
                 .iter()
-                .any(|c| c.border_radius == 8)
+                .any(|c| c.border_radius == 8 && c.has_shadow)
+        );
+        assert!(
+            decoded
+                .display_list
+                .iter()
+                .any(|c| c.tag == "a" && c.is_bold)
+        );
+        assert!(
+            decoded
+                .display_list
+                .iter()
+                .any(|c| c.is_italic)
         );
 
         // Gömülü bitmap görsel pikselleri de bozulmadan taşınmış olmalı!

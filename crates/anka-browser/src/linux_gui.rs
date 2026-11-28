@@ -50,6 +50,9 @@ const GDK_KEY_RETURN: u32 = 0xff0d;
 const GDK_KEY_ESCAPE: u32 = 0xff1b;
 const GDK_KEY_KP_ENTER: u32 = 0xff8d;
 const GDK_KEY_F5: u32 = 0xffc2;
+const GDK_KEY_KP_ADD: u32 = 0xffab;
+const GDK_KEY_KP_SUBTRACT: u32 = 0xffad;
+const GDK_KEY_KP_0: u32 = 0xffb0;
 const GDK_KEY_ISO_LEFT_TAB: u32 = 0xfe20;
 
 // GDK Kaydırma Yönleri:
@@ -136,6 +139,8 @@ struct GtkCairoApi {
     ) -> c_ulong,
 
     cairo_set_source_rgb: unsafe extern "C" fn(*mut CairoT, c_double, c_double, c_double),
+    cairo_set_source_rgba:
+        unsafe extern "C" fn(*mut CairoT, c_double, c_double, c_double, c_double),
     cairo_rectangle: unsafe extern "C" fn(*mut CairoT, c_double, c_double, c_double, c_double),
     cairo_new_sub_path: unsafe extern "C" fn(*mut CairoT),
     cairo_arc: unsafe extern "C" fn(*mut CairoT, c_double, c_double, c_double, c_double, c_double),
@@ -268,6 +273,7 @@ fn gtk_api() -> Option<&'static GtkCairoApi> {
                 g_signal_connect_data: load_sym(gobj, c"g_signal_connect_data")?,
 
                 cairo_set_source_rgb: load_sym(cairo, c"cairo_set_source_rgb")?,
+                cairo_set_source_rgba: load_sym(cairo, c"cairo_set_source_rgba")?,
                 cairo_rectangle: load_sym(cairo, c"cairo_rectangle")?,
                 cairo_new_sub_path: load_sym(cairo, c"cairo_new_sub_path")?,
                 cairo_arc: load_sym(cairo, c"cairo_arc")?,
@@ -303,6 +309,9 @@ struct LinuxGuiApp {
     btn_bookmark_toggle: usize,
     btn_shield: usize,
     url_entry: usize,
+    find_bar: usize,
+    find_entry: usize,
+    find_info_label: usize,
     canvas: usize,
     status_label: usize,
     state: BrowserState,
@@ -356,6 +365,7 @@ fn arayuzu_guncelle(api: &GtkCairoApi, app: &LinuxGuiApp) {
     };
     let bm_c = to_cstr(bm_label);
     let shield_c = to_cstr(&app.state.shield_button_label());
+    let find_info_c = to_cstr(&app.state.find_status_text());
 
     unsafe {
         (api.gtk_window_set_title)(app.window as *mut GtkWindow, title_c.as_ptr());
@@ -363,6 +373,28 @@ fn arayuzu_guncelle(api: &GtkCairoApi, app: &LinuxGuiApp) {
         (api.gtk_label_set_text)(app.status_label as *mut GtkLabel, status_c.as_ptr());
         (api.gtk_button_set_label)(app.btn_bookmark_toggle as *mut GtkButton, bm_c.as_ptr());
         (api.gtk_button_set_label)(app.btn_shield as *mut GtkButton, shield_c.as_ptr());
+        (api.gtk_label_set_text)(
+            app.find_info_label as *mut GtkLabel,
+            find_info_c.as_ptr(),
+        );
+
+        let find_bar = app.find_bar as *mut GtkWidget;
+        if app.state.is_find_open() {
+            let entry = app.find_entry as *mut GtkEntry;
+            let raw_cur = (api.gtk_entry_get_text)(entry);
+            let cur_text = if raw_cur.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(raw_cur).to_string_lossy().into_owned()
+            };
+            if cur_text != app.state.find_query() {
+                let q_c = to_cstr(app.state.find_query());
+                (api.gtk_entry_set_text)(entry, q_c.as_ptr());
+            }
+            (api.gtk_widget_show_all)(find_bar);
+        } else {
+            (api.gtk_widget_hide)(find_bar);
+        }
 
         for (idx, &btn_ptr) in app.tab_buttons.iter().enumerate() {
             let btn = btn_ptr as *mut GtkWidget;
@@ -636,7 +668,118 @@ unsafe extern "C" fn on_canvas_key_press(
     if handled { 1 } else { 0 }
 }
 
-/// Pencere geneli tarayıcı kısayolları (`Ctrl+T`, `Ctrl+W`, `Ctrl+L`, `Ctrl+R`, `F5`, `Ctrl+U`):
+fn arama_durumu_yenile(api: &GtkCairoApi, app: &LinuxGuiApp) {
+    let find_info_c = to_cstr(&app.state.find_status_text());
+    let status_c = to_cstr(&app.state.status_message());
+    unsafe {
+        (api.gtk_label_set_text)(app.find_info_label as *mut GtkLabel, find_info_c.as_ptr());
+        (api.gtk_label_set_text)(app.status_label as *mut GtkLabel, status_c.as_ptr());
+        (api.gtk_widget_queue_draw)(app.canvas as *mut GtkWidget);
+    }
+}
+
+unsafe extern "C" fn on_find_entry_changed(widget: *mut GtkWidget, _data: *mut c_void) {
+    let Some(api) = gtk_api() else { return };
+    let query = unsafe {
+        let raw = (api.gtk_entry_get_text)(widget as *mut GtkEntry);
+        if raw.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(raw).to_string_lossy().into_owned()
+        }
+    };
+    if let Ok(mut guard) = LINUX_APP.lock()
+        && let Some(app) = guard.as_mut()
+    {
+        app.state.set_find_query(&query);
+        arama_durumu_yenile(api, app);
+    }
+}
+
+unsafe extern "C" fn on_find_entry_activate(_widget: *mut GtkWidget, _data: *mut c_void) {
+    let Some(api) = gtk_api() else { return };
+    if let Ok(mut guard) = LINUX_APP.lock()
+        && let Some(app) = guard.as_mut()
+    {
+        app.state.find_next(false);
+        arama_durumu_yenile(api, app);
+    }
+}
+
+unsafe extern "C" fn on_find_entry_key_press(
+    _widget: *mut GtkWidget,
+    event: *const GdkEvent,
+    _data: *mut c_void,
+) -> c_int {
+    let Some(api) = gtk_api() else { return 0 };
+    let mut keyval: u32 = 0;
+    if unsafe { (api.gdk_event_get_keyval)(event, &mut keyval) } == 0 {
+        return 0;
+    }
+    let mut mod_state: u32 = 0;
+    let _ = unsafe { (api.gdk_event_get_state)(event, &mut mod_state) };
+    let shift = (mod_state & GDK_SHIFT_MASK) != 0;
+
+    if shift && matches!(keyval, GDK_KEY_RETURN | GDK_KEY_KP_ENTER) {
+        if let Ok(mut guard) = LINUX_APP.lock()
+            && let Some(app) = guard.as_mut()
+        {
+            app.state.find_next(true);
+            arama_durumu_yenile(api, app);
+        }
+        return 1;
+    }
+
+    if keyval == GDK_KEY_ESCAPE {
+        if let Ok(mut guard) = LINUX_APP.lock()
+            && let Some(app) = guard.as_mut()
+        {
+            app.state.close_find();
+            arayuzu_guncelle(api, app);
+            unsafe {
+                (api.gtk_widget_grab_focus)(app.canvas as *mut GtkWidget);
+            }
+        }
+        return 1;
+    }
+
+    0
+}
+
+unsafe extern "C" fn on_find_prev_clicked(_widget: *mut GtkWidget, _data: *mut c_void) {
+    let Some(api) = gtk_api() else { return };
+    if let Ok(mut guard) = LINUX_APP.lock()
+        && let Some(app) = guard.as_mut()
+    {
+        app.state.find_next(true);
+        arama_durumu_yenile(api, app);
+    }
+}
+
+unsafe extern "C" fn on_find_next_clicked(_widget: *mut GtkWidget, _data: *mut c_void) {
+    let Some(api) = gtk_api() else { return };
+    if let Ok(mut guard) = LINUX_APP.lock()
+        && let Some(app) = guard.as_mut()
+    {
+        app.state.find_next(false);
+        arama_durumu_yenile(api, app);
+    }
+}
+
+unsafe extern "C" fn on_find_close_clicked(_widget: *mut GtkWidget, _data: *mut c_void) {
+    let Some(api) = gtk_api() else { return };
+    if let Ok(mut guard) = LINUX_APP.lock()
+        && let Some(app) = guard.as_mut()
+    {
+        app.state.close_find();
+        arayuzu_guncelle(api, app);
+        unsafe {
+            (api.gtk_widget_grab_focus)(app.canvas as *mut GtkWidget);
+        }
+    }
+}
+
+/// Pencere geneli tarayıcı kısayolları (`Ctrl+T`, `Ctrl+W`, `Ctrl+L`, `Ctrl+R`, `F5`, `Ctrl+U`, `Ctrl+F`, `Ctrl+`/`-`/`0`):
 unsafe extern "C" fn on_window_key_press(
     _widget: *mut GtkWidget,
     event: *const GdkEvent,
@@ -650,6 +793,62 @@ unsafe extern "C" fn on_window_key_press(
     let mut mod_state: u32 = 0;
     let _ = unsafe { (api.gdk_event_get_state)(event, &mut mod_state) };
     let ctrl = (mod_state & GDK_CONTROL_MASK) != 0;
+
+    if ctrl && matches!(keyval, 0x0066 | 0x0046) {
+        if let Ok(mut guard) = LINUX_APP.lock()
+            && let Some(app) = guard.as_mut()
+        {
+            app.state.open_find();
+            arayuzu_guncelle(api, app);
+            unsafe {
+                (api.gtk_widget_grab_focus)(app.find_entry as *mut GtkWidget);
+            }
+        }
+        return 1;
+    }
+
+    if keyval == GDK_KEY_ESCAPE
+        && let Ok(mut guard) = LINUX_APP.lock()
+        && let Some(app) = guard.as_mut()
+        && app.state.is_find_open()
+    {
+        app.state.close_find();
+        arayuzu_guncelle(api, app);
+        unsafe {
+            (api.gtk_widget_grab_focus)(app.canvas as *mut GtkWidget);
+        }
+        return 1;
+    }
+
+    if ctrl && matches!(keyval, 0x002b | 0x003d | GDK_KEY_KP_ADD) {
+        if let Ok(mut guard) = LINUX_APP.lock()
+            && let Some(app) = guard.as_mut()
+        {
+            app.state.zoom_in();
+            arayuzu_guncelle(api, app);
+        }
+        return 1;
+    }
+
+    if ctrl && matches!(keyval, 0x002d | 0x005f | GDK_KEY_KP_SUBTRACT) {
+        if let Ok(mut guard) = LINUX_APP.lock()
+            && let Some(app) = guard.as_mut()
+        {
+            app.state.zoom_out();
+            arayuzu_guncelle(api, app);
+        }
+        return 1;
+    }
+
+    if ctrl && matches!(keyval, 0x0030 | GDK_KEY_KP_0) {
+        if let Ok(mut guard) = LINUX_APP.lock()
+            && let Some(app) = guard.as_mut()
+        {
+            app.state.zoom_reset();
+            arayuzu_guncelle(api, app);
+        }
+        return 1;
+    }
 
     if keyval == GDK_KEY_F5 || (ctrl && matches!(keyval, 0x0072 | 0x0052)) {
         if let Ok(mut guard) = LINUX_APP.lock()
@@ -810,15 +1009,47 @@ unsafe extern "C" fn on_canvas_draw(
             (api.cairo_rectangle)(cr, 0.0, 0.0, width, height);
             (api.cairo_fill)(cr);
 
+            let zoom_scale = (app.state.zoom_percent() as c_double) / 100.0;
+            let visible_w = width / zoom_scale.min(1.0);
+            let visible_h = height / zoom_scale;
             let scroll_y = app.state.scroll_y();
-            for komut in app.state.display_list() {
+            (api.cairo_save)(cr);
+            (api.cairo_scale)(cr, zoom_scale, zoom_scale);
+            for (cmd_idx, komut) in app.state.display_list().iter().enumerate() {
                 let draw_x = (komut.x as c_double) + 8.0;
                 let draw_y = (komut.y as i32 - scroll_y) as c_double;
-                let box_w = (komut.width as c_double).min((width - 24.0).max(100.0));
+                let box_w = (komut.width as c_double).min((visible_w - 24.0).max(100.0));
                 let box_h = komut.height as c_double;
 
-                if draw_y + box_h < 0.0 || draw_y > height {
+                if draw_y + box_h < 0.0 || draw_y > visible_h {
                     continue;
+                }
+
+                // 1.5. Kutunun CSS `box-shadow` gölgesi varsa arka planın altında 2 katmanlı yumuşak gölge çiz
+                if komut.has_shadow {
+                    (api.cairo_set_source_rgba)(cr, 0.06, 0.09, 0.16, 0.07);
+                    cairo_draw_box_path(
+                        api,
+                        cr,
+                        draw_x - 4.0 + 4.0,
+                        draw_y - 2.0 + 6.0,
+                        box_w,
+                        box_h,
+                        komut.border_radius,
+                    );
+                    (api.cairo_fill)(cr);
+
+                    (api.cairo_set_source_rgba)(cr, 0.06, 0.09, 0.16, 0.14);
+                    cairo_draw_box_path(
+                        api,
+                        cr,
+                        draw_x - 4.0 + 2.0,
+                        draw_y - 2.0 + 3.0,
+                        box_w,
+                        box_h,
+                        komut.border_radius,
+                    );
+                    (api.cairo_fill)(cr);
                 }
 
                 // 2. Kutu arka plan rengi (`background-color`)
@@ -919,6 +1150,42 @@ unsafe extern "C" fn on_canvas_draw(
                     (api.cairo_stroke)(cr);
                 }
 
+                // 3.5. `Ctrl+F` sayfa içi arama eşleşmesi vurgusu (aktif turuncu, diğerleri sarı)
+                if let Some(is_active_match) = app.state.find_match_kind(cmd_idx) {
+                    if is_active_match {
+                        (api.cairo_set_source_rgba)(cr, 251.0 / 255.0, 146.0 / 255.0, 60.0 / 255.0, 0.46);
+                    } else {
+                        (api.cairo_set_source_rgba)(cr, 254.0 / 255.0, 240.0 / 255.0, 138.0 / 255.0, 0.46);
+                    }
+                    cairo_draw_box_path(
+                        api,
+                        cr,
+                        draw_x - 4.0,
+                        draw_y - 2.0,
+                        box_w,
+                        box_h,
+                        komut.border_radius,
+                    );
+                    (api.cairo_fill)(cr);
+
+                    if is_active_match {
+                        (api.cairo_set_source_rgb)(cr, 234.0 / 255.0, 88.0 / 255.0, 12.0 / 255.0);
+                    } else {
+                        (api.cairo_set_source_rgb)(cr, 234.0 / 255.0, 179.0 / 255.0, 8.0 / 255.0);
+                    }
+                    (api.cairo_set_line_width)(cr, if is_active_match { 2.0 } else { 1.2 });
+                    cairo_draw_box_path(
+                        api,
+                        cr,
+                        draw_x - 4.0,
+                        draw_y - 2.0,
+                        box_w,
+                        box_h,
+                        komut.border_radius,
+                    );
+                    (api.cairo_stroke)(cr);
+                }
+
                 // 4. Metin ve link alt çizgisi (`<input>` ise kullanıcının yazdığı canlı değeri göster!)
                 let mut live_text_color = komut.color;
                 let render_text: String = if let Some(input_name) = &komut.input_name {
@@ -950,11 +1217,12 @@ unsafe extern "C" fn on_canvas_draw(
                 };
 
                 if !gorsel_cizildi && !render_text.is_empty() {
-                    let is_bold = matches!(
-                        komut.tag.as_str(),
-                        "h1" | "h2" | "h3" | "strong" | "b"
-                    );
-                    let is_italic = matches!(komut.tag.as_str(), "em" | "i");
+                    let is_bold = komut.is_bold
+                        || matches!(
+                            komut.tag.as_str(),
+                            "h1" | "h2" | "h3" | "strong" | "b"
+                        );
+                    let is_italic = komut.is_italic || matches!(komut.tag.as_str(), "em" | "i");
                     let is_code = komut.tag == "code";
                     let is_link_text = komut.tag == "a"
                         || (komut.href.is_some()
@@ -1114,6 +1382,7 @@ unsafe extern "C" fn on_canvas_draw(
                     }
                 }
             }
+            (api.cairo_restore)(cr);
         } else {
             (api.cairo_set_source_rgb)(cr, 1.0, 1.0, 1.0);
             (api.cairo_rectangle)(cr, 0.0, 0.0, width, height);
@@ -1249,6 +1518,57 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) -> bool {
             on_shield_toggle_clicked as GCallback,
         );
 
+        // SAYFA İÇİ ARAMA ÇUBUĞU (`Ctrl+F`, varsayılan olarak gizli)
+        let find_bar = (api.gtk_box_new)(GTK_ORIENTATION_HORIZONTAL, 6);
+        (api.gtk_container_set_border_width)(find_bar as *mut GtkContainer, 4);
+        let find_prompt = (api.gtk_label_new)(to_cstr("Ara (Ctrl+F):").as_ptr());
+        let find_entry = (api.gtk_entry_new)();
+        let btn_find_prev = (api.gtk_button_new_with_label)(to_cstr("< Onceki").as_ptr());
+        let btn_find_next = (api.gtk_button_new_with_label)(to_cstr("Sonraki >").as_ptr());
+        let find_info_label =
+            (api.gtk_label_new)(to_cstr(&state.find_status_text()).as_ptr());
+        let btn_find_close = (api.gtk_button_new_with_label)(to_cstr("X Kapat").as_ptr());
+
+        (api.gtk_box_pack_start)(find_bar as *mut GtkBox, find_prompt, 0, 0, 2);
+        (api.gtk_box_pack_start)(find_bar as *mut GtkBox, find_entry, 1, 1, 2);
+        (api.gtk_box_pack_start)(find_bar as *mut GtkBox, btn_find_prev, 0, 0, 0);
+        (api.gtk_box_pack_start)(find_bar as *mut GtkBox, btn_find_next, 0, 0, 0);
+        (api.gtk_box_pack_start)(find_bar as *mut GtkBox, find_info_label, 0, 0, 6);
+        (api.gtk_box_pack_start)(find_bar as *mut GtkBox, btn_find_close, 0, 0, 0);
+        (api.gtk_box_pack_start)(vbox as *mut GtkBox, find_bar, 0, 1, 0);
+
+        connect_signal(api, find_entry, "changed", on_find_entry_changed as GCallback);
+        connect_signal(
+            api,
+            find_entry,
+            "activate",
+            on_find_entry_activate as GCallback,
+        );
+        connect_signal(
+            api,
+            find_entry,
+            "key-press-event",
+            on_find_entry_key_press as GCallback,
+        );
+        connect_signal(
+            api,
+            btn_find_prev,
+            "clicked",
+            on_find_prev_clicked as GCallback,
+        );
+        connect_signal(
+            api,
+            btn_find_next,
+            "clicked",
+            on_find_next_clicked as GCallback,
+        );
+        connect_signal(
+            api,
+            btn_find_close,
+            "clicked",
+            on_find_close_clicked as GCallback,
+        );
+
         // ORTA WEB TUVALİ
         let canvas = (api.gtk_drawing_area_new)();
         (api.gtk_widget_set_can_focus)(canvas, 1);
@@ -1287,6 +1607,9 @@ pub fn pencereyi_baslat(baslangic_adresi: &str) -> bool {
             btn_bookmark_toggle: btn_bookmark_toggle as usize,
             btn_shield: btn_shield as usize,
             url_entry: url_entry as usize,
+            find_bar: find_bar as usize,
+            find_entry: find_entry as usize,
+            find_info_label: find_info_label as usize,
             canvas: canvas as usize,
             status_label: status_label as usize,
             state,

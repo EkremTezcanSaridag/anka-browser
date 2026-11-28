@@ -67,6 +67,9 @@ pub struct LayoutBox {
     pub is_post_form: bool,
     pub is_multiline: bool,
     pub border_radius: u32,
+    pub has_shadow: bool,
+    pub is_bold: bool,
+    pub is_italic: bool,
 }
 
 /// CSS genişlik / maksimum genişlik ölçüsü (`px` veya `%`):
@@ -103,6 +106,9 @@ struct ResolvedStyle {
     bg_color: Option<String>,
     border_color: Option<String>,
     border_radius: u32,
+    has_shadow: bool,
+    font_bold: Option<bool>,
+    font_italic: Option<bool>,
     font_size: u32,
     padding: u32,
     margin: u32,
@@ -120,6 +126,9 @@ impl Default for ResolvedStyle {
             bg_color: None,
             border_color: None,
             border_radius: 0,
+            has_shadow: false,
+            font_bold: None,
+            font_italic: None,
             font_size: 16,
             padding: 0,
             margin: 0,
@@ -150,6 +159,8 @@ struct NodeContext {
     form_method_post: bool,
     text_align: Option<String>,
     inherited_color: Option<String>,
+    inherited_bold: Option<bool>,
+    inherited_italic: Option<bool>,
     current_style: ResolvedStyle,
     ancestors: Vec<AncestorInfo>,
     /// Üst kapsayıcı (örn: `.kart` veya `#duyuru`) zaten arka plan/çerçeve çizdiyse çocuk metinler tekrar çerçeve çizmez!
@@ -332,6 +343,28 @@ fn apply_declaration(decl: &Declaration, style: &mut ResolvedStyle) {
         "max-width" => style.max_width = SizeSpec::parse(&decl.value),
         "display" => style.display = decl.value.trim().to_lowercase(),
         "text-align" => style.text_align = decl.value.trim().to_lowercase(),
+        "box-shadow" => {
+            let v = decl.value.trim().to_lowercase();
+            style.has_shadow = !v.is_empty() && !matches!(v.as_str(), "none" | "initial" | "unset");
+        }
+        "font-weight" => {
+            let v = decl.value.trim().to_lowercase();
+            let clean = v.strip_suffix("!important").unwrap_or(&v).trim();
+            if matches!(clean, "bold" | "bolder" | "600" | "700" | "800" | "900") {
+                style.font_bold = Some(true);
+            } else if matches!(clean, "normal" | "lighter" | "300" | "400") {
+                style.font_bold = Some(false);
+            }
+        }
+        "font-style" => {
+            let v = decl.value.trim().to_lowercase();
+            let clean = v.strip_suffix("!important").unwrap_or(&v).trim();
+            if matches!(clean, "italic" | "oblique") {
+                style.font_italic = Some(true);
+            } else if clean == "normal" {
+                style.font_italic = Some(false);
+            }
+        }
         _ => {}
     }
 }
@@ -602,6 +635,9 @@ fn layout_node(
                     is_post_form: false,
                     is_multiline: false,
                     border_radius: 4,
+                    has_shadow: false,
+                    is_bold: false,
+                    is_italic: false,
                 });
 
                 *inline_x += box_w + 10;
@@ -651,6 +687,9 @@ fn layout_node(
                     is_post_form: false,
                     is_multiline: false,
                     border_radius: 0,
+                    has_shadow: false,
+                    is_bold: false,
+                    is_italic: false,
                 });
                 *current_y += 18;
                 return;
@@ -728,6 +767,9 @@ fn layout_node(
                     is_post_form: false,
                     is_multiline: false,
                     border_radius: 0,
+                    has_shadow: false,
+                    is_bold: false,
+                    is_italic: false,
                 });
 
                 *current_y += img_h + 14;
@@ -822,6 +864,9 @@ fn layout_node(
                     is_post_form: ctx.form_method_post,
                     is_multiline: false,
                     border_radius: 5,
+                    has_shadow: is_submit,
+                    is_bold: is_submit,
+                    is_italic: false,
                 });
 
                 *inline_x += box_w + 10;
@@ -890,6 +935,9 @@ fn layout_node(
                     is_post_form: ctx.form_method_post,
                     is_multiline: true,
                     border_radius: 6,
+                    has_shadow: false,
+                    is_bold: false,
+                    is_italic: false,
                 });
 
                 *current_y += box_h + 12;
@@ -965,6 +1013,28 @@ fn layout_node(
             }
             if own_style.color != "black" {
                 next_ctx.inherited_color = Some(own_style.color.clone());
+            }
+            if own_style.font_bold.is_none() {
+                own_style.font_bold = ctx.inherited_bold;
+            }
+            if own_style.font_italic.is_none() {
+                own_style.font_italic = ctx.inherited_italic;
+            }
+            if own_style.font_bold.is_some()
+                || matches!(tag_name.as_str(), "b" | "strong" | "h1" | "h2" | "h3")
+            {
+                next_ctx.inherited_bold = Some(
+                    own_style
+                        .font_bold
+                        .unwrap_or(matches!(tag_name.as_str(), "b" | "strong" | "h1" | "h2" | "h3")),
+                );
+            }
+            if own_style.font_italic.is_some() || matches!(tag_name.as_str(), "em" | "i") {
+                next_ctx.inherited_italic = Some(
+                    own_style
+                        .font_italic
+                        .unwrap_or(matches!(tag_name.as_str(), "em" | "i")),
+                );
             }
 
             // Dış boşluk (margin-top) uygula:
@@ -1064,6 +1134,9 @@ fn layout_node(
                     is_post_form: false,
                     is_multiline: false,
                     border_radius: own_style.border_radius,
+                    has_shadow: own_style.has_shadow,
+                    is_bold: own_style.font_bold.unwrap_or(false),
+                    is_italic: own_style.font_italic.unwrap_or(false),
                 });
 
                 next_ctx.container_painted_bg = true;
@@ -1145,7 +1218,14 @@ fn layout_node(
             if ctx.container_painted_bg && matches!(current_tag, "p" | "li" | "div" | "span") {
                 style.bg_color = None;
                 style.border_color = None;
+                style.has_shadow = false;
             }
+            let text_is_bold = style
+                .font_bold
+                .unwrap_or(matches!(current_tag, "h1" | "h2" | "h3" | "strong" | "b"));
+            let text_is_italic = style
+                .font_italic
+                .unwrap_or(matches!(current_tag, "em" | "i"));
 
             let pad = style.padding;
             let line_height = style.font_size + 10 + pad * 2;
@@ -1200,6 +1280,9 @@ fn layout_node(
                     is_post_form: ctx.form_method_post,
                     is_multiline: false,
                     border_radius: style.border_radius,
+                    has_shadow: style.has_shadow,
+                    is_bold: text_is_bold,
+                    is_italic: text_is_italic,
                 });
 
                 *inline_x += item_w + 12;
@@ -1262,6 +1345,9 @@ fn layout_node(
                     is_post_form: false,
                     is_multiline: false,
                     border_radius: style.border_radius,
+                    has_shadow: style.has_shadow,
+                    is_bold: text_is_bold,
+                    is_italic: text_is_italic,
                 });
                 *current_y += pad;
             }
@@ -1308,6 +1394,9 @@ fn layout_node(
                     is_post_form: false,
                     is_multiline: false,
                     border_radius: if has_own_frame { 0 } else { style.border_radius },
+                    has_shadow: if has_own_frame { false } else { style.has_shadow },
+                    is_bold: text_is_bold,
+                    is_italic: text_is_italic,
                 });
 
                 if idx + 1 < line_count {
@@ -1580,5 +1669,31 @@ mod tests {
         assert_eq!(area.input_name.as_deref(), Some("icerik"));
         assert_eq!(area.text, "Not yaz...");
         assert_eq!(area.height, 94);
+    }
+
+    #[test]
+    fn test_box_shadow_ve_font_weight_style_mirasi() {
+        let html = "<body><div class=\"kart\"><p>Kalin ve Egik</p><p class=\"duz\">Normal</p></div></body>";
+        let css = ".kart { background-color: #ecfdf5; box-shadow: 0 4px 10px rgba(0,0,0,0.1); font-weight: bold; font-style: italic; } .duz { font-weight: normal; font-style: normal; }";
+        let dom = parse_html(html);
+        let kurallar = parse_css(css);
+        let kutular = compute_layout(&dom, &kurallar, 800);
+
+        let kart = kutular
+            .iter()
+            .find(|b| b.tag == "div" && b.bg_color.is_some())
+            .expect("golgeli kart kutusu");
+        let p_miras = kutular
+            .iter()
+            .find(|b| b.text == "Kalin ve Egik")
+            .expect("miras alan p");
+        let p_duz = kutular.iter().find(|b| b.text == "Normal").expect("normal p");
+
+        assert!(kart.has_shadow);
+        assert!(!p_miras.has_shadow);
+        assert!(p_miras.is_bold);
+        assert!(p_miras.is_italic);
+        assert!(!p_duz.is_bold);
+        assert!(!p_duz.is_italic);
     }
 }

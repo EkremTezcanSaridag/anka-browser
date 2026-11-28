@@ -612,6 +612,9 @@ pub struct PaintCommand {
     pub is_post_form: bool,
     pub is_multiline: bool,
     pub border_radius: u32,
+    pub has_shadow: bool,
+    pub is_bold: bool,
+    pub is_italic: bool,
 }
 
 /// `anka-layout` modülünden gelen koordinatlı kutuları (`LayoutBox`),
@@ -644,6 +647,9 @@ pub fn build_display_list(boxes: &[LayoutBox]) -> Vec<PaintCommand> {
             is_post_form: b.is_post_form,
             is_multiline: b.is_multiline,
             border_radius: b.border_radius,
+            has_shadow: b.has_shadow,
+            is_bold: b.is_bold,
+            is_italic: b.is_italic,
         });
     }
 
@@ -679,6 +685,9 @@ mod tests {
             is_post_form: false,
             is_multiline: false,
             border_radius: 8,
+            has_shadow: true,
+            is_bold: true,
+            is_italic: false,
         }];
 
         let cizim_listesi = build_display_list(&kutular);

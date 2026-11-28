@@ -1,6 +1,6 @@
 // Anka Browser - İşletim Sisteminden Bağımsız Ortak Tarayıcı Durumu (BrowserState)
-// Çok Süreçli (Multi-Process) Sekme İzolasyonu, Anka Kalkan, Kalıcı Yer İmleri & Çerezler,
-// DevTools, Klavye Odak Geçişi ve Canlı HTML `<form>` / `<input>` Yönetimi (v0.3.2)
+// Çok Süreçli (Multi-Process) Sekme İzolasyonu, Anka Kalkan, Kalıcı Yer İmleri, Geçmiş & Çerezler,
+// DevTools, Sayfa İçi Arama (Ctrl+F), Yakınlaştırma (Zoom) ve Canlı HTML `<form>` / `<textarea>` Yönetimi (v0.3.4)
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,6 +12,9 @@ use anka_url::Url;
 
 use crate::process_ipc::{RenderSnapshot, TabWorkerClient};
 use crate::{extract_form_field, html_escape, normalize_address};
+
+/// Sekme yakınlaştırma (`Ctrl+` / `Ctrl-` / `Ctrl+0`) adım tablosu (%)
+const ZOOM_LEVELS: &[u32] = &[50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200];
 
 /// Kullanıcının web sayfası tuvaline tıkladığında tetiklenebilecek eylem türleri:
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +48,16 @@ pub struct TabState {
     pub focused_input: Option<String>,
     /// Bu sekmedeki `<input name="...">` kutularına kullanıcının yazdığı metinler
     pub input_values: HashMap<String, String>,
+    /// Sekmeye özel yakınlaştırma oranı (%50 ..= %200, varsayılan %100)
+    pub zoom_percent: u32,
+    /// `Ctrl+F` sayfa içi arama çubuğu açık mı?
+    pub find_open: bool,
+    /// `Ctrl+F` arama sorgu metni
+    pub find_query: String,
+    /// Arama sorgusuyla eşleşen `display_list` komut indisleri
+    pub find_matches: Vec<usize>,
+    /// Aktif vurgulu eşleşmenin `find_matches` içindeki sırası
+    pub find_active: usize,
 }
 
 /// Kullanıcının kaydettiği tek bir Yer İmi (Bookmark) kaydı:
@@ -324,6 +337,11 @@ impl BrowserState {
                 scroll_y: 0,
                 focused_input: None,
                 input_values: HashMap::new(),
+                zoom_percent: 100,
+                find_open: false,
+                find_query: String::new(),
+                find_matches: Vec::new(),
+                find_active: 0,
             }],
             active_tab: 0,
             bookmarks,
@@ -484,10 +502,11 @@ impl BrowserState {
             format!("PID:{}", active.page.pid)
         };
         format!(
-            "[Sekme {}/{} | {} | {}] {}",
+            "[Sekme {}/{} | {} | %{} | {}] {}",
             self.active_tab + 1,
             self.tabs.len(),
             pid_tag,
+            active.zoom_percent,
             yildiz,
             active.page.status_message
         )
@@ -504,8 +523,8 @@ impl BrowserState {
     pub fn window_title(&self) -> String {
         let tab_info = format!("[Sekme {}/{}]", self.active_tab + 1, self.tabs.len());
         match &self.active().page.page_title {
-            Some(t) => format!("{t} {tab_info} — Anka Browser v0.3.3"),
-            None => format!("Anka Browser v0.3.3 {tab_info} — Telek Engine"),
+            Some(t) => format!("{t} {tab_info} — Anka Browser v0.3.4"),
+            None => format!("Anka Browser v0.3.4 {tab_info} — Telek Engine"),
         }
     }
 
@@ -575,6 +594,11 @@ impl BrowserState {
             scroll_y: 0,
             focused_input: None,
             input_values: HashMap::new(),
+            zoom_percent: 100,
+            find_open: false,
+            find_query: String::new(),
+            find_matches: Vec::new(),
+            find_active: 0,
         });
         self.active_tab = self.tabs.len() - 1;
         self.open_request(initial_address, None, false);
@@ -931,6 +955,10 @@ impl BrowserState {
             tab.scroll_y = 0;
             tab.focused_input = None;
             tab.input_values.clear();
+            tab.find_open = false;
+            tab.find_query.clear();
+            tab.find_matches.clear();
+            tab.find_active = 0;
         }
 
         if !loaded_crashed {
@@ -978,6 +1006,174 @@ impl BrowserState {
     pub fn scroll_by(&mut self, delta_y: i32) {
         let tab = self.active_mut();
         tab.scroll_y = (tab.scroll_y + delta_y).max(0);
+    }
+
+    /// Aktif sekmenin yakınlaştırma oranını (%) döndürür (`50..=200`).
+    pub fn zoom_percent(&self) -> u32 {
+        self.active().zoom_percent
+    }
+
+    /// Aktif sekmeyi bir kademe yakınlaştırır (`Ctrl+` / `Ctrl+=`).
+    pub fn zoom_in(&mut self) -> u32 {
+        let tab = self.active_mut();
+        if let Some(&next) = ZOOM_LEVELS.iter().find(|&&z| z > tab.zoom_percent) {
+            tab.zoom_percent = next;
+        }
+        tab.zoom_percent
+    }
+
+    /// Aktif sekmeyi bir kademe uzaklaştırır (`Ctrl-`).
+    pub fn zoom_out(&mut self) -> u32 {
+        let tab = self.active_mut();
+        if let Some(&prev) = ZOOM_LEVELS.iter().rfind(|&&z| z < tab.zoom_percent) {
+            tab.zoom_percent = prev;
+        }
+        tab.zoom_percent
+    }
+
+    /// Aktif sekmenin yakınlaştırmasını `%100` varsayılan değerine sıfırlar (`Ctrl+0`).
+    pub fn zoom_reset(&mut self) -> u32 {
+        let tab = self.active_mut();
+        tab.zoom_percent = 100;
+        100
+    }
+
+    /// Yakınlaştırılmış/uzaklaştırılmış tuval koordinatını ham sayfa (layout) koordinatına çevirir.
+    fn canvas_to_layout(&self, canvas_x: i32, canvas_y: i32) -> (i32, i32) {
+        let zoom = self.active().zoom_percent.max(50) as i32;
+        ((canvas_x * 100) / zoom, (canvas_y * 100) / zoom)
+    }
+
+    /// Sayfa içi arama (`Ctrl+F`) çubuğu açık mı?
+    pub fn is_find_open(&self) -> bool {
+        self.active().find_open
+    }
+
+    /// Sayfa içi arama (`Ctrl+F`) sorgu metnini döndürür.
+    pub fn find_query(&self) -> &str {
+        &self.active().find_query
+    }
+
+    /// Arama çubuğunun sağında gösterilen `1/4` veya `0/0 eslesme` durum metnini üretir.
+    pub fn find_status_text(&self) -> String {
+        let tab = self.active();
+        if tab.find_query.is_empty() {
+            "Aramak icin yazin".to_string()
+        } else if tab.find_matches.is_empty() {
+            "0/0 eslesme".to_string()
+        } else {
+            format!("{}/{}", tab.find_active + 1, tab.find_matches.len())
+        }
+    }
+
+    /// Belirtilen `display_list` komutunun aktif arama sonucu (`Some(true)`), diğer eşleşme
+    /// (`Some(false)`) veya eşleşmeyen (`None`) olduğunu döndürür.
+    pub fn find_match_kind(&self, cmd_idx: usize) -> Option<bool> {
+        let tab = self.active();
+        if !tab.find_open || tab.find_matches.is_empty() {
+            return None;
+        }
+        if tab.find_matches.get(tab.find_active) == Some(&cmd_idx) {
+            Some(true)
+        } else if tab.find_matches.contains(&cmd_idx) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// `Ctrl+F` sayfa içi arama çubuğunu açar ve mevcut sorgu varsa eşleşmeleri günceller.
+    pub fn open_find(&mut self) {
+        self.active_mut().find_open = true;
+        if !self.active().find_query.is_empty() {
+            self.recompute_find_matches();
+        }
+    }
+
+    /// Sayfa içi arama çubuğunu (`Esc` / `Kapat`) kapatır ve vurguları temizler.
+    pub fn close_find(&mut self) {
+        let tab = self.active_mut();
+        tab.find_open = false;
+        tab.find_matches.clear();
+        tab.find_active = 0;
+    }
+
+    /// Sayfa içi arama sorgusunu günceller, büyük/küçük harf duyarsız eşleşmeleri hesaplar
+    /// ve ilk eşleşmeye otomatik kaydırır.
+    pub fn set_find_query(&mut self, query: &str) {
+        {
+            let tab = self.active_mut();
+            tab.find_open = true;
+            if tab.find_query == query && (!query.is_empty() && !tab.find_matches.is_empty()) {
+                return;
+            }
+            tab.find_query = query.to_string();
+        }
+        self.recompute_find_matches();
+    }
+
+    /// Sonraki (`reverse = false`, `Enter`) veya önceki (`reverse = true`, `Shift+Enter`)
+    /// eşleşmeye atlar ve görünümü o kutuya kaydırır.
+    pub fn find_next(&mut self, reverse: bool) -> bool {
+        {
+            let tab = self.active_mut();
+            if tab.find_matches.is_empty() {
+                return false;
+            }
+            let len = tab.find_matches.len();
+            tab.find_active = if reverse {
+                (tab.find_active + len - 1) % len
+            } else {
+                (tab.find_active + 1) % len
+            };
+        }
+        self.scroll_to_active_find_match();
+        true
+    }
+
+    fn recompute_find_matches(&mut self) {
+        let needle = self.active().find_query.trim().to_lowercase();
+        if needle.is_empty() {
+            let tab = self.active_mut();
+            tab.find_matches.clear();
+            tab.find_active = 0;
+            return;
+        }
+        let matches: Vec<usize> = self
+            .active()
+            .page
+            .display_list
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, cmd)| {
+                if !cmd.is_password && cmd.text.to_lowercase().contains(&needle) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        {
+            let tab = self.active_mut();
+            tab.find_matches = matches;
+            tab.find_active = 0;
+        }
+        self.scroll_to_active_find_match();
+    }
+
+    fn scroll_to_active_find_match(&mut self) {
+        let tab = self.active_mut();
+        let Some(&cmd_idx) = tab.find_matches.get(tab.find_active) else {
+            return;
+        };
+        let Some(cmd) = tab.page.display_list.get(cmd_idx) else {
+            return;
+        };
+        let match_y = cmd.y as i32;
+        let visible_h = (480 * 100) / tab.zoom_percent.max(50) as i32;
+        if match_y < tab.scroll_y || match_y + 24 > tab.scroll_y + visible_h {
+            tab.scroll_y = (match_y - visible_h / 4).max(0);
+        }
     }
 
     /// Odaklı bir `<input>` kutusuna tek bir karakter yazar.
@@ -1142,6 +1338,7 @@ impl BrowserState {
 
     #[allow(dead_code)]
     pub fn is_interactive_at(&self, canvas_x: i32, canvas_y: i32) -> bool {
+        let (lx, ly) = self.canvas_to_layout(canvas_x, canvas_y);
         let tab = self.active();
         tab.page.display_list.iter().any(|komut| {
             if komut.href.is_some()
@@ -1153,10 +1350,7 @@ impl BrowserState {
                 let draw_right = draw_x + komut.width as i32;
                 let draw_y = komut.y as i32 - tab.scroll_y;
                 let draw_bottom = draw_y + komut.height as i32;
-                canvas_x >= draw_x
-                    && canvas_x <= draw_right
-                    && canvas_y >= draw_y
-                    && canvas_y <= draw_bottom
+                lx >= draw_x && lx <= draw_right && ly >= draw_y && ly <= draw_bottom
             } else {
                 false
             }
@@ -1169,6 +1363,7 @@ impl BrowserState {
     /// 3. `<button onclick="...">` -> Canlı `anka-js` çalıştırır (`ClickAction::Redraw`).
     /// 4. `<a href="...">` -> Yeni adrese gider (`ClickAction::Navigate`).
     pub fn click_at(&mut self, canvas_x: i32, canvas_y: i32) -> ClickAction {
+        let (lx, ly) = self.canvas_to_layout(canvas_x, canvas_y);
         let tab = self.active();
         let mut found_input: Option<String> = None;
         let mut found_submit: Option<(String, bool)> = None;
@@ -1181,11 +1376,7 @@ impl BrowserState {
             let draw_y = komut.y as i32 - tab.scroll_y;
             let draw_bottom = draw_y + komut.height as i32;
 
-            if canvas_x >= draw_x
-                && canvas_x <= draw_right
-                && canvas_y >= draw_y
-                && canvas_y <= draw_bottom
-            {
+            if lx >= draw_x && lx <= draw_right && ly >= draw_y && ly <= draw_bottom {
                 if let Some(name) = &komut.input_name {
                     found_input = Some(name.clone());
                     break;
@@ -1218,8 +1409,13 @@ impl BrowserState {
 
         if let Some(js_code) = found_onclick {
             let vw = self.viewport_width;
-            let tab = self.active_mut();
-            tab.page = tab.worker.eval_js(&js_code, vw);
+            {
+                let tab = self.active_mut();
+                tab.page = tab.worker.eval_js(&js_code, vw);
+            }
+            if self.active().find_open && !self.active().find_query.is_empty() {
+                self.recompute_find_matches();
+            }
             return ClickAction::Redraw;
         }
 
@@ -1595,7 +1791,7 @@ mod tests {
             state
                 .display_list()
                 .iter()
-                .any(|b| b.text.contains("Anka JS v0.3.3 baslatildi"))
+                .any(|b| b.text.contains("Anka JS v0.3.4 baslatildi"))
         );
 
         // view-source: sayfanin ham HTML kaynağını satır numaralarıyla göstermeli:
@@ -1732,5 +1928,84 @@ mod tests {
         }
         assert!(state.display_list().iter().any(|b| b.text == "Ilk"));
         assert!(state.display_list().iter().any(|b| b.text == "Ikinci"));
+    }
+
+    #[test]
+    fn test_zoom_olcekleme_ve_koordinat_donusumu() {
+        let mut state = BrowserState::new("http://anka.local/hosgeldiniz", 860);
+        assert_eq!(state.zoom_percent(), 100);
+        assert!(state.status_message().contains("%100"));
+
+        assert_eq!(state.zoom_in(), 110);
+        assert_eq!(state.zoom_in(), 125);
+        assert!(state.status_message().contains("%125"));
+
+        // Her sekme kendi yakınlaştırma seviyesini bağımsız saklamalı:
+        state.new_tab("http://anka.local/oturum");
+        assert_eq!(state.zoom_percent(), 100);
+        assert!(state.switch_tab(0));
+        assert_eq!(state.zoom_percent(), 125);
+
+        // %125 büyütülmüş ekranda fare tıklaması layout koordinatına doğru çevrilmeli:
+        let oturum_link = state
+            .display_list()
+            .iter()
+            .find(|b| b.href.as_deref() == Some("http://anka.local/oturum"))
+            .expect("Oturum Testi linki")
+            .clone();
+        let lx = oturum_link.x as i32 + 12;
+        let ly = oturum_link.y as i32 + 8;
+        let scaled_x = (lx * 125) / 100;
+        let scaled_y = (ly * 125) / 100;
+        assert!(state.is_interactive_at(scaled_x, scaled_y));
+        assert_eq!(
+            state.click_at(scaled_x, scaled_y),
+            ClickAction::Navigate("http://anka.local/oturum".to_string())
+        );
+        // Sekme içi gezinmede yakınlaştırma korunmalı, Ctrl+0 ile %100'e dönmeli:
+        assert_eq!(state.zoom_percent(), 125);
+        assert_eq!(state.zoom_reset(), 100);
+
+        for _ in 0..10 {
+            state.zoom_out();
+        }
+        assert_eq!(state.zoom_percent(), 50);
+    }
+
+    #[test]
+    fn test_ctrl_f_sayfa_ici_arama_ve_vurgulama() {
+        let mut state = BrowserState::new("http://anka.local/hosgeldiniz", 860);
+        assert!(!state.is_find_open());
+        state.open_find();
+        assert!(state.is_find_open());
+        assert_eq!(state.find_status_text(), "Aramak icin yazin");
+
+        state.set_find_query("anka");
+        assert!(state.active().find_matches.len() >= 2);
+        let first = state.active().find_matches[0];
+        let second = state.active().find_matches[1];
+        assert_eq!(state.find_match_kind(first), Some(true));
+        assert_eq!(state.find_match_kind(second), Some(false));
+        assert!(state.find_status_text().starts_with("1/"));
+
+        assert!(state.find_next(false));
+        assert_eq!(state.find_match_kind(first), Some(false));
+        assert_eq!(state.find_match_kind(second), Some(true));
+        assert!(state.find_status_text().starts_with("2/"));
+
+        assert!(state.find_next(true));
+        assert_eq!(state.find_match_kind(first), Some(true));
+
+        // Sayfanın altındaki öğeye otomatik kaydırma kontrolü:
+        state.set_find_query("sifirla");
+        assert!(!state.active().find_matches.is_empty());
+        assert!(state.scroll_y() > 0);
+
+        // Eşleşme yoksa 0/0 raporlanmalı ve Kapat/Esc vurguları temizlemeli:
+        state.set_find_query("bulunamayan_kelime_xyz");
+        assert_eq!(state.find_status_text(), "0/0 eslesme");
+        state.close_find();
+        assert!(!state.is_find_open());
+        assert_eq!(state.find_match_kind(first), None);
     }
 }
